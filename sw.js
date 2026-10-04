@@ -1,4 +1,4 @@
-const CACHE = 'finanse-domowe-v1';
+const CACHE = 'finanse-domowe-v2';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -12,7 +12,7 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
   event.respondWith(
-    fetch(request).then(response => {
+    fetch(request, { cache: 'no-cache' }).then(response => {
       if (response.ok) { const copy = response.clone(); caches.open(CACHE).then(cache => cache.put(request, copy)); }
       return response;
     }).catch(() => caches.match(request).then(cached => cached || caches.match('./index.html')))
