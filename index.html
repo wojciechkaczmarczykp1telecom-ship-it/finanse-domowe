@@ -507,7 +507,8 @@ body{
 <meta name="theme-color" content="#1a237e">
 <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
 <link rel="icon" type="image/png" sizes="512x512" href="./icon-512.png">
-<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="icon" type="image/png" href="./favicon-32.png">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 </head>
 <body>
 
@@ -684,6 +685,26 @@ body{
       <button class="btn-sm btn-sm-primary" onclick="addExpenseCat()">Dodaj</button>
     </div>
     <p class="receipt-help">Usunięcie kategorii nie zmienia zapisanych wydatków — w raportach są oznaczone „usunięta” i można je przenieść do innej kategorii.</p>
+  </div>
+
+  <!-- PIN-Y OSÓB (widoczne tylko w PWA: window.FD_PWA) -->
+  <div class="card" id="pin-card" style="display:none">
+    <div class="card-title">🔐 PIN-y osób</div>
+    <p class="receipt-help">Każda osoba może mieć własny PIN. Właściciel (PIN główny) dodaje, zmienia i usuwa PIN-y osób.</p>
+    <div class="ecat-list" id="pin-list"></div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <input type="text" id="pin-person-name" class="finput" maxlength="20"
+             placeholder="Imię" aria-label="Imię osoby"
+             style="flex:1;min-width:0;font-size:14px;padding:10px 12px">
+      <input type="password" id="pin-person-value" class="finput" inputmode="numeric"
+             placeholder="PIN" aria-label="PIN osoby" autocomplete="new-password"
+             style="flex:1;min-width:0;font-size:14px;padding:10px 12px"
+             onkeydown="if(event.key==='Enter')addPersonPin()">
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+      <button class="btn-sm btn-sm-primary" onclick="addPersonPin()">Dodaj / zmień PIN</button>
+      <span id="pin-msg" class="receipt-help" role="status" style="margin:0"></span>
+    </div>
   </div>
 
   <!-- DŁUGI -->
@@ -1554,6 +1575,7 @@ function saveIncome() {
 ════════════════════════════════════════════════ */
 function loadMore() {
   renderExpenseCatList();
+  initPinAdmin();
   loadBudgetPreview();
   run('getSavings', [], renderSavings,
     () => { document.getElementById('savings-content').innerHTML =
@@ -1930,6 +1952,69 @@ function applyExpenseCats(names) {
   });
   markMissingCategories(false);
   if (_receipt) renderReceiptItems();
+}
+
+/* ── PIN-y osób (tylko w PWA) ── */
+function pinAdminReady() {
+  return typeof window !== 'undefined' && window.FD_PWA === true && window.fdPwaAdmin;
+}
+
+// Sekcja jest widoczna wyłącznie w PWA; w legacy (HtmlService) zostaje ukryta.
+function initPinAdmin() {
+  const card = document.getElementById('pin-card');
+  if (!card) return;
+  if (!pinAdminReady()) return;
+  card.style.display = '';
+  loadPersonPins();
+}
+
+function pinMsg(text) {
+  const el = document.getElementById('pin-msg');
+  if (el) el.textContent = text || '';
+}
+
+function pinErrorText(err) {
+  const code = String(err && (err.message || err) || '');
+  if (code === 'PIN_ZAJETY') return 'Ten PIN jest już używany — wybierz inny.';
+  if (code === 'PIN_ZA_KROTKI') return 'PIN musi mieć 4–32 znaki.';
+  if (code === 'NAZWA') return 'Podaj imię.';
+  return 'Błąd: ' + code;
+}
+
+function renderPersonPins(names) {
+  const el = document.getElementById('pin-list');
+  if (!el) return;
+  if (!names || !names.length) {
+    el.innerHTML = '<span class="receipt-help">Brak dodatkowych PIN-ów.</span>';
+    return;
+  }
+  el.innerHTML = names.map(n =>
+    `<span class="ecat-chip"><i style="background:var(--primary-light)"></i>${esc(n)}` +
+    `<button type="button" aria-label="Usuń PIN ${esc(n)}" onclick="removePersonPin('${esc(n)}')">✕</button></span>`).join('');
+}
+
+function loadPersonPins() {
+  if (!pinAdminReady()) return;
+  window.fdPwaAdmin.lista().then(renderPersonPins).catch(err => pinMsg(pinErrorText(err)));
+}
+
+function addPersonPin() {
+  if (!pinAdminReady()) return;
+  const name = document.getElementById('pin-person-name').value;
+  const pin = document.getElementById('pin-person-value').value;
+  window.fdPwaAdmin.dodaj(name, pin).then(() => {
+    document.getElementById('pin-person-name').value = '';
+    document.getElementById('pin-person-value').value = '';
+    pinMsg('Zapisano PIN.');
+    loadPersonPins();
+  }).catch(err => pinMsg(pinErrorText(err)));
+}
+
+function removePersonPin(slug) {
+  if (!pinAdminReady()) return;
+  if (!confirm(`Usunąć PIN osoby „${slug}"?`)) return;
+  window.fdPwaAdmin.usun(slug).then(() => { pinMsg('Usunięto PIN.'); loadPersonPins(); })
+    .catch(err => pinMsg(pinErrorText(err)));
 }
 
 /* ── Długi ── */
@@ -3261,16 +3346,18 @@ function demoData(fn) {
   var PIN_KEY = 'fd_pin';
   var pinSetupPromise = null;
   var pinPromptPromise = null;
+  var pinFailCount = 0;
+  var pinLocked = false;
 
   function readPin() { try { return localStorage.getItem(PIN_KEY) || ''; } catch (e) { return ''; } }
   function writePin(p) { try { localStorage.setItem(PIN_KEY, String(p)); } catch (e) {} }
   function clearPin() { try { localStorage.removeItem(PIN_KEY); } catch (e) {} }
 
   // Jedno pytanie o istniejący PIN (zły PIN). Równoległe wywołania czekają na ten sam prompt.
-  function requestExistingPin() {
+  function requestExistingPin(message) {
     if (pinPromptPromise) return pinPromptPromise;
     pinPromptPromise = Promise.resolve().then(function () {
-      var value = window.prompt('Podaj PIN aplikacji Finanse Domowe');
+      var value = window.prompt(message || 'Podaj PIN aplikacji Finanse Domowe');
       if (value === null) return null;
       value = String(value).trim();
       if (!value) return null;
@@ -3324,9 +3411,34 @@ function demoData(fn) {
   }
 
   function ensurePin() {
+    if (pinLocked) return Promise.resolve(null);
     var existing = readPin();
     if (existing) return Promise.resolve(existing);
     return requestPinSetup();
+  }
+
+  // Zły PIN: jedno wspólne okno na wszystkie równoległe wywołania; po 3 nieudanych
+  // próbach z rzędu (liczone per okno) blokada do przeładowania strony.
+  function handleWrongPin(fn, args, success, failure, userObject) {
+    if (pinLocked) { if (failure) failure(new Error('PIN'), userObject); return; }
+    if (pinPromptPromise) {
+      return pinPromptPromise.then(function (retry) {
+        if (retry === null) { if (failure) failure(new Error('PIN'), userObject); return; }
+        return deliver(fn, args, success, failure, userObject, retry);
+      });
+    }
+    pinFailCount++;
+    if (pinFailCount > 3) {
+      pinLocked = true;
+      window.alert('Zbyt wiele nieudanych prób. Otwórz aplikację ponownie.');
+      if (failure) failure(new Error('PIN'), userObject);
+      return;
+    }
+    clearPin();
+    return requestExistingPin('Nieprawidłowy PIN. Spróbuj ponownie:').then(function (retry) {
+      if (retry === null) { if (failure) failure(new Error('PIN'), userObject); return; }
+      return deliver(fn, args, success, failure, userObject, retry);
+    });
   }
 
   function deliver(fn, args, success, failure, userObject, pin) {
@@ -3338,6 +3450,7 @@ function demoData(fn) {
       return response.json();
     }).then(function (data) {
       if (data && data.ok) {
+        pinFailCount = 0;
         if (success) success(data.result, userObject);
         return;
       }
@@ -3349,11 +3462,7 @@ function demoData(fn) {
         });
       }
       if (data && data.error === 'PIN') {
-        clearPin();
-        return requestExistingPin().then(function (retry) {
-          if (retry === null) { if (failure) failure(new Error('PIN'), userObject); return; }
-          return deliver(fn, args, success, failure, userObject, retry);
-        });
+        return handleWrongPin(fn, args, success, failure, userObject);
       }
       if (failure) failure(new Error((data && data.error) || 'Błąd serwera.'), userObject);
     }).catch(function () {
@@ -3378,6 +3487,23 @@ function demoData(fn) {
       }
     });
   }
+  function callApi(fn, args) {
+    return new Promise(function (resolve, reject) {
+      ensurePin().then(function (pin) {
+        if (pin === null) { reject(new Error('Brak PIN-u.')); return; }
+        deliver(fn, args, resolve, reject, undefined, pin);
+      });
+    });
+  }
+
+  // Znacznik dla UI (sekcja „PIN-y osób”) i API administracji PIN-ami.
+  window.FD_PWA = true;
+  window.fdPwaAdmin = {
+    lista: function () { return callApi('__listaPinow', []); },
+    dodaj: function (nazwa, pin) { return callApi('__dodajPin', [nazwa, pin]); },
+    usun: function (nazwa) { return callApi('__usunPin', [nazwa]); }
+  };
+
   window.google = { script: { run: runner(null, null, null) } };
 })("https://script.google.com/macros/s/AKfycbwxLAuUQLQJVo68LvfE-DNUJ7gxuo5yJCbO6_E4UT69fU_oWjP04oD-OWPiN_tJ/exec");
 /* Po starcie pobierz aktualne kategorie z backendu (jedno źródło prawdy). */
