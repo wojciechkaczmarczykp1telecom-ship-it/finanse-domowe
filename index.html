@@ -3282,6 +3282,11 @@ function demoData(fn) {
         if (success) success(data.result, userObject);
         return;
       }
+      if (data && data.error === 'PIN_BRAK') {
+        window.alert('PIN nie jest jeszcze ustawiony na serwerze. Dodaj właściwość appPin w ustawieniach projektu Apps Script.');
+        if (failure) failure(new Error('PIN_BRAK'), userObject);
+        return;
+      }
       if (data && data.error === 'PIN') {
         clearPin();
         var retry = askPin('Nieprawidłowy PIN. Podaj PIN aplikacji Finanse Domowe:');
