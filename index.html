@@ -1231,7 +1231,8 @@ function renderHist(d) {
     const personBadge = i.person
       ? `<span class="person-badge ${i.person==='Wojtek'?'badge-w':'badge-s'}">${i.person}</span>`
       : '';
-    const delBtn = (i.rowNum && i.sheetName && S.person !== 'razem' && !i.receipt)
+    // Usuwanie działa też w widoku „Razem” — każdy wpis niesie własny sheetName i rowNum.
+    const delBtn = (i.rowNum && i.sheetName && !i.receipt)
       ? `<button class="tx-del" onclick="askDelete('${i._t}','${i.sheetName}',${i.rowNum},'${esc(i._t==='exp'?(i.details||i.category):i.source||'Przychód')}')" title="Usuń">🗑️</button>`
       : '';
 
@@ -1453,14 +1454,15 @@ function confirmDelete() {
 
   const fn = type === 'exp' ? 'deleteExpense' : 'deleteIncome';
   run(fn, [sheetName, rowNum], res => {
-    if (res.success) {
+    if (res && res.success) {
       toast('✓ Usunięto', 'ok');
       S.cachedHist = null;
       S.cachedDash = null;
       loadHist();
       loadDash();
     } else {
-      toast('Błąd: ' + res.error, 'err');
+      // Błąd serwera zwracany jako {success:false} — pokazujemy go, żeby awaria nie była cicha.
+      toast('Błąd: ' + ((res && res.error) || 'Nie udało się usunąć wpisu.'), 'err');
     }
   }, err => toast('Błąd: ' + (err.message||err), 'err'));
 }
