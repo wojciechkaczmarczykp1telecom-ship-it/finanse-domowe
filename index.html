@@ -3259,17 +3259,76 @@ function demoData(fn) {
 /* google.script.run → fetch do doPost (PWA, build_pwa.cjs) */
 (function pwaShim(EXEC_URL) {
   var PIN_KEY = 'fd_pin';
+  var pinSetupPromise = null;
+  var pinPromptPromise = null;
+
   function readPin() { try { return localStorage.getItem(PIN_KEY) || ''; } catch (e) { return ''; } }
-  function writePin(p) { try { localStorage.setItem(PIN_KEY, p); } catch (e) {} }
+  function writePin(p) { try { localStorage.setItem(PIN_KEY, String(p)); } catch (e) {} }
   function clearPin() { try { localStorage.removeItem(PIN_KEY); } catch (e) {} }
-  function askPin(message) {
-    var value = window.prompt(message || 'Podaj PIN aplikacji Finanse Domowe');
-    if (value === null) return null;
-    value = String(value).trim();
-    if (!value) return null;
-    writePin(value);
-    return value;
+
+  // Jedno pytanie o istniejący PIN (zły PIN). Równoległe wywołania czekają na ten sam prompt.
+  function requestExistingPin() {
+    if (pinPromptPromise) return pinPromptPromise;
+    pinPromptPromise = Promise.resolve().then(function () {
+      var value = window.prompt('Podaj PIN aplikacji Finanse Domowe');
+      if (value === null) return null;
+      value = String(value).trim();
+      if (!value) return null;
+      writePin(value);
+      return value;
+    }).then(function (value) { pinPromptPromise = null; return value; },
+            function () { pinPromptPromise = null; return null; });
+    return pinPromptPromise;
   }
+
+  // Pierwsze ustawienie PIN-u (dwa prompty) + POST __ustawPin. Współdzielona obietnica,
+  // żeby kilka równoległych wywołań przy starcie otwierało tylko jeden komplet okien.
+  function requestPinSetup() {
+    if (pinSetupPromise) return pinSetupPromise;
+    pinSetupPromise = setupPinFlow().then(
+      function (value) { pinSetupPromise = null; return value; },
+      function () { pinSetupPromise = null; return null; });
+    return pinSetupPromise;
+  }
+
+  function setupPinFlow() {
+    var first = window.prompt('Pierwsze uruchomienie: ustaw PIN aplikacji (min. 4 znaki)');
+    if (first === null) return Promise.resolve(null);
+    var second = window.prompt('Powtórz PIN');
+    if (second === null) return Promise.resolve(null);
+    first = String(first).trim();
+    second = String(second).trim();
+    if (first !== second) {
+      window.alert('PIN-y się różnią.');
+      return setupPinFlow();
+    }
+    return fetch(EXEC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ fn: '__ustawPin', args: [], pin: first })
+    }).then(function (response) {
+      return response.json();
+    }).then(function (data) {
+      if (data && data.ok) { writePin(first); return first; }
+      if (data && data.error === 'PIN_ISTNIEJE') { clearPin(); return requestExistingPin(); }
+      if (data && data.error === 'PIN_ZA_KROTKI') {
+        window.alert('PIN musi mieć od 4 do 32 znaków.');
+        return setupPinFlow();
+      }
+      window.alert('Nie udało się ustawić PIN-u.');
+      return null;
+    }).catch(function () {
+      window.alert('Brak połączenia z serwerem');
+      return null;
+    });
+  }
+
+  function ensurePin() {
+    var existing = readPin();
+    if (existing) return Promise.resolve(existing);
+    return requestPinSetup();
+  }
+
   function deliver(fn, args, success, failure, userObject, pin) {
     return fetch(EXEC_URL, {
       method: 'POST',
@@ -3283,22 +3342,25 @@ function demoData(fn) {
         return;
       }
       if (data && data.error === 'PIN_BRAK') {
-        window.alert('PIN nie jest jeszcze ustawiony na serwerze. Dodaj właściwość appPin w ustawieniach projektu Apps Script.');
-        if (failure) failure(new Error('PIN_BRAK'), userObject);
-        return;
+        clearPin();
+        return requestPinSetup().then(function (newPin) {
+          if (newPin === null) { if (failure) failure(new Error('Brak PIN-u.'), userObject); return; }
+          return deliver(fn, args, success, failure, userObject, newPin);
+        });
       }
       if (data && data.error === 'PIN') {
         clearPin();
-        var retry = askPin('Nieprawidłowy PIN. Podaj PIN aplikacji Finanse Domowe:');
-        if (retry !== null) return deliver(fn, args, success, failure, userObject, retry);
-        if (failure) failure(new Error('PIN'), userObject);
-        return;
+        return requestExistingPin().then(function (retry) {
+          if (retry === null) { if (failure) failure(new Error('PIN'), userObject); return; }
+          return deliver(fn, args, success, failure, userObject, retry);
+        });
       }
       if (failure) failure(new Error((data && data.error) || 'Błąd serwera.'), userObject);
     }).catch(function () {
       if (failure) failure(new Error('Brak połączenia z serwerem'), userObject);
     });
   }
+
   function runner(success, failure, userObject) {
     return new Proxy({}, {
       get: function (target, prop) {
@@ -3308,12 +3370,10 @@ function demoData(fn) {
         if (typeof prop !== 'string') return undefined;
         return function () {
           var args = Array.prototype.slice.call(arguments);
-          var pin = readPin();
-          if (!pin) {
-            pin = askPin();
+          return ensurePin().then(function (pin) {
             if (pin === null) { if (failure) failure(new Error('Brak PIN-u.'), userObject); return; }
-          }
-          return deliver(prop, args, success, failure, userObject, pin);
+            return deliver(prop, args, success, failure, userObject, pin);
+          });
         };
       }
     });
