@@ -3344,25 +3344,78 @@ function demoData(fn) {
 /* google.script.run → fetch do doPost (PWA, build_pwa.cjs) */
 (function pwaShim(EXEC_URL) {
   var PIN_KEY = 'fd_pin';
+  var memPin = '';                 // PIN trzymany w pamięci — localStorage bywa zablokowany (np. Huawei)
   var pinSetupPromise = null;
   var pinPromptPromise = null;
   var pinFailCount = 0;
   var pinLocked = false;
 
-  function readPin() { try { return localStorage.getItem(PIN_KEY) || ''; } catch (e) { return ''; } }
-  function writePin(p) { try { localStorage.setItem(PIN_KEY, String(p)); } catch (e) {} }
-  function clearPin() { try { localStorage.removeItem(PIN_KEY); } catch (e) {} }
+  // Katalog aplikacji jako path ciasteczka, np. /finanse-domowe/.
+  function cookiePath() {
+    try {
+      var p = String(location.pathname || '/');
+      var dir = p.slice(0, p.lastIndexOf('/') + 1);
+      return dir || '/';
+    } catch (e) { return '/'; }
+  }
+  function hasDoc() { return typeof document !== 'undefined' && document; }
+  function hasLoc() { return typeof location !== 'undefined' && location; }
+  function readCookie() {
+    if (!hasDoc()) return '';
+    try {
+      var parts = String(document.cookie || '').split(';');
+      for (var i = 0; i < parts.length; i++) {
+        var kv = parts[i].replace(/^\s+/, '');
+        if (kv.indexOf(PIN_KEY + '=') === 0) return decodeURIComponent(kv.slice(PIN_KEY.length + 1));
+      }
+    } catch (e) {}
+    return '';
+  }
+  function writeCookie(value) {
+    if (!hasDoc()) return;
+    try {
+      var secure = (hasLoc() && location.protocol === 'https:') ? '; Secure' : '';
+      document.cookie = PIN_KEY + '=' + encodeURIComponent(value) +
+        '; max-age=31536000; path=' + cookiePath() + '; SameSite=Strict' + secure;
+    } catch (e) {}
+  }
+  function clearCookie() {
+    if (!hasDoc()) return;
+    try {
+      var secure = (hasLoc() && location.protocol === 'https:') ? '; Secure' : '';
+      document.cookie = PIN_KEY + '=; max-age=0; path=' + cookiePath() + '; SameSite=Strict' + secure;
+    } catch (e) {}
+  }
 
-  // Jedno pytanie o istniejący PIN (zły PIN). Równoległe wywołania czekają na ten sam prompt.
+  function readPin() {
+    if (memPin) return memPin;
+    var ls = '';
+    try { ls = localStorage.getItem(PIN_KEY) || ''; } catch (e) {}
+    if (ls) { memPin = ls; return ls; }
+    var ck = readCookie();
+    if (ck) { memPin = ck; return ck; }
+    return '';
+  }
+  function writePin(p) {
+    memPin = String(p);
+    try { localStorage.setItem(PIN_KEY, memPin); } catch (e) {}
+    writeCookie(memPin);
+  }
+  function clearPin() {
+    memPin = '';
+    try { localStorage.removeItem(PIN_KEY); } catch (e) {}
+    clearCookie();
+  }
+
+  // Jedno pytanie o istniejący PIN. Równoległe wywołania czekają na ten sam prompt.
+  // Zapisu dokonujemy dopiero po potwierdzeniu `ok` z serwera (nie tutaj).
   function requestExistingPin(message) {
     if (pinPromptPromise) return pinPromptPromise;
     pinPromptPromise = Promise.resolve().then(function () {
       var value = window.prompt(message || 'Podaj PIN aplikacji Finanse Domowe');
       if (value === null) return null;
       value = String(value).trim();
-      if (!value) return null;
-      writePin(value);
-      return value;
+      return value || null;
     }).then(function (value) { pinPromptPromise = null; return value; },
             function () { pinPromptPromise = null; return null; });
     return pinPromptPromise;
@@ -3410,11 +3463,20 @@ function demoData(fn) {
     });
   }
 
+  // Nie pytamy od razu o ustawienie: przy pustym lokalnym PIN-ie najpierw
+  // wysyłamy żądanie z pustym PIN-em — odpowiedź serwera zdecyduje o dalszym kroku.
   function ensurePin() {
     if (pinLocked) return Promise.resolve(null);
-    var existing = readPin();
-    if (existing) return Promise.resolve(existing);
-    return requestPinSetup();
+    return Promise.resolve(readPin());
+  }
+
+  // Serwer ma już PIN, a lokalnie pusto: jedno pytanie „Podaj PIN…”, bez liczenia jako błąd.
+  function promptFirstContact(fn, args, success, failure, userObject) {
+    if (pinLocked) { if (failure) failure(new Error('PIN'), userObject); return; }
+    return requestExistingPin('Podaj PIN aplikacji Finanse Domowe').then(function (retry) {
+      if (retry === null) { if (failure) failure(new Error('PIN'), userObject); return; }
+      return deliver(fn, args, success, failure, userObject, retry, false);
+    });
   }
 
   // Zły PIN: jedno wspólne okno na wszystkie równoległe wywołania; po 3 nieudanych
@@ -3441,7 +3503,7 @@ function demoData(fn) {
     });
   }
 
-  function deliver(fn, args, success, failure, userObject, pin) {
+  function deliver(fn, args, success, failure, userObject, pin, unresolved) {
     return fetch(EXEC_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -3451,6 +3513,7 @@ function demoData(fn) {
     }).then(function (data) {
       if (data && data.ok) {
         pinFailCount = 0;
+        if (pin) writePin(pin);   // trwały zapis dopiero po potwierdzeniu z serwera
         if (success) success(data.result, userObject);
         return;
       }
@@ -3458,10 +3521,11 @@ function demoData(fn) {
         clearPin();
         return requestPinSetup().then(function (newPin) {
           if (newPin === null) { if (failure) failure(new Error('Brak PIN-u.'), userObject); return; }
-          return deliver(fn, args, success, failure, userObject, newPin);
+          return deliver(fn, args, success, failure, userObject, newPin, false);
         });
       }
       if (data && data.error === 'PIN') {
+        if (unresolved) return promptFirstContact(fn, args, success, failure, userObject);
         return handleWrongPin(fn, args, success, failure, userObject);
       }
       if (failure) failure(new Error((data && data.error) || 'Błąd serwera.'), userObject);
@@ -3481,7 +3545,7 @@ function demoData(fn) {
           var args = Array.prototype.slice.call(arguments);
           return ensurePin().then(function (pin) {
             if (pin === null) { if (failure) failure(new Error('Brak PIN-u.'), userObject); return; }
-            return deliver(prop, args, success, failure, userObject, pin);
+            return deliver(prop, args, success, failure, userObject, pin, pin === '');
           });
         };
       }
@@ -3491,7 +3555,7 @@ function demoData(fn) {
     return new Promise(function (resolve, reject) {
       ensurePin().then(function (pin) {
         if (pin === null) { reject(new Error('Brak PIN-u.')); return; }
-        deliver(fn, args, resolve, reject, undefined, pin);
+        deliver(fn, args, resolve, reject, undefined, pin, pin === '');
       });
     });
   }
