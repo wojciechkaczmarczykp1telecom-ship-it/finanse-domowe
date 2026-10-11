@@ -734,10 +734,11 @@ body{
       </details>
     </div>
     <div class="card">
-      <div class="card-title">📥 Import wyciągu ING</div>
+      <div class="card-title">📥 Import wyciągu ING / Erste</div>
       <p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6">
         Pobierz wyciąg z ING:<br>
         <strong>Moje finanse → Historia → Pobierz → CSV lub PDF</strong><br>
+        Erste Bank: historia rachunku jako PDF.<br>
         Importowane są tylko wydatki (kwoty ujemne).
       </p>
       <div class="fg">
@@ -748,7 +749,7 @@ body{
         </div>
       </div>
       <div class="fg">
-        <label class="flabel">Plik CSV lub PDF z ING</label>
+        <label class="flabel">Plik CSV lub PDF (ING) albo PDF (Erste)</label>
         <input type="file" id="imp-file" accept=".csv,.txt,.pdf" class="finput" style="padding:11px">
       </div>
       <button class="btn-submit" onclick="analyzeImport()">Analizuj wyciąg →</button>
@@ -2544,7 +2545,7 @@ function findRuleKey(contractor) {
 
 function analyzeImport() {
   const fi = document.getElementById('imp-file');
-  if (!fi.files.length) return toast('Wybierz plik CSV lub PDF z ING', 'err');
+  if (!fi.files.length) return toast('Wybierz plik CSV lub PDF z banku', 'err');
   const file = fi.files[0];
   if (file.name.toLowerCase().endsWith('.pdf')) {
     _analyzeImportPdf(file);
@@ -2646,6 +2647,8 @@ async function parseIngPdf(file) {
       const sorted = items.sort((a, b) => a.x - b.x);
       return { page, y, items: sorted, text: sorted.map(i => i.text).join(' ').trim() };
     });
+
+  if (sortedRows.some(row => /Erste Bank Polska/i.test(row.text))) return parseErsteRows(sortedRows);
 
   const dateAnyRe = /(\d{4}-\d{2}-\d{2}|\d{2}[.\-]\d{2}[.\-]\d{4})/;
   const negAmtRe  = /[-−–]\s*(\d[\d\s]*[,]\d{2})/g;
@@ -2767,7 +2770,74 @@ async function parseIngPdf(file) {
   }
   return rows.length
     ? { rows }
-    : { error: 'Nie znaleziono wydatków w PDF.\nUpewnij się, że to wyciąg ING:\nMoje finanse → Historia → Pobierz → PDF.' };
+    : { error: 'Nie znaleziono wydatków w PDF.\nUpewnij się, że to wyciąg ING (Moje finanse → Historia → Pobierz → PDF)\nalbo historia rachunku z Erste Banku.' };
+}
+
+// „Historia rachunku” z Erste Banku: każda operacja zaczyna się wierszem „Data operacji”,
+// kolumny: data (x<140), opis (140–380), kwota (380–480), saldo po operacji (≥480).
+// Erste nie podaje numeru transakcji — ID składamy z daty, kwoty i salda po operacji
+// (stałe przy ponownym pobraniu historii), bo backend przyjmuje wyłącznie cyfry.
+function parseErsteRows(sortedRows) {
+  const money = s => Math.round(parseFloat(String(s).replace(/PLN/i, '').replace(/[\s ]/g, '').replace(/[−–]/g, '-').replace(',', '.')) * 100);
+  const footerRe = /Dokument jest wydrukiem|Erste Bank Polska S\.A\.|Spółka jest zarejestrowana|Krajowego Rejestru Sądowego|Wysokość kapitału|Strona \d+\/\d+/i;
+  const col = (row, left, right) => row.items.filter(i => i.x >= left && i.x < right).map(i => i.text).join(' ').trim();
+
+  const ops = [];
+  let current = null;
+  let inOps = false;
+  for (const row of sortedRows) {
+    if (/Zestawienie operacji/i.test(row.text)) { inOps = true; continue; }
+    if (/Podsumowanie końcowe/i.test(row.text)) { inOps = false; current = null; continue; }
+    if (!inOps || footerRe.test(row.text)) continue;
+    if (/^Data operacji/i.test(col(row, 0, 140))) { current = []; ops.push(current); }
+    if (current) current.push(row);
+  }
+
+  const rows = [];
+  for (const op of ops) {
+    const head = op[0];
+    const amountText = col(head, 380, 480);
+    const balanceText = col(head, 480, 1000);
+    if (!/^[-−–]/.test(amountText)) continue; // tylko wydatki
+    const cents = Math.abs(money(amountText));
+    const balance = money(balanceText);
+    if (!cents || isNaN(balance)) continue;
+
+    const dateM = op.map(r => col(r, 0, 140)).join(' ').match(/\d{4}-\d{2}-\d{2}/);
+    if (!dateM) continue;
+
+    const lines = op.map(r => col(r, 140, 380)).filter(Boolean);
+    const toIdx = lines.findIndex(l => /^Na rachunek:/i.test(l));
+    const titleIdx = lines.findIndex(l => /^Tytuł:/i.test(l));
+    const contractor = toIdx >= 0
+      ? lines.slice(toIdx + 1, titleIdx > toIdx ? titleIdx : undefined).join('\n')
+          .replace(/\s+(?:ul\.|al\.)\s.*$/gim, '').trim() : ''; // adres sprzedawcy to szum
+    const title = titleIdx >= 0
+      ? [lines[titleIdx].replace(/^Tytuł:\s*/i, '')].concat(lines.slice(titleIdx + 1)).join(' ').trim() : '';
+    const fromIdx = lines.findIndex(l => /^Z rachunku:/i.test(l));
+    const owner = fromIdx >= 0 ? (lines[fromIdx + 1] || '') : '';
+    const norm = s => s.toUpperCase().replace(/\s+/g, ' ').trim();
+    const isOwn = !!contractor && owner && norm(owner).startsWith(norm(contractor.split('\n')[0]));
+
+    rows.push({
+      date: dateM[0],
+      contractor: isOwn ? 'Przelew własny' : (contractor || 'Nieznany odbiorca'),
+      title: title || contractor,
+      isTransfer: isOwn,
+      amount: cents / 100,
+      transactionId: '9' + dateM[0].replace(/-/g, '') + String(cents) + (balance < 0 ? '1' : '0') + String(Math.abs(balance)),
+      rawText: op.map(r => r.text).join(' ')
+    });
+  }
+
+  const summary = sortedRows.find(r => /Suma wydatków/i.test(r.text));
+  const countM = summary?.text.match(/Liczba operacji:\s*(\d+)/i);
+  const sumM = summary?.text.match(/Suma wydatków:\s*([-−–]?\s*[\d\s ]+,\d{2})/i);
+  if (countM && sumM && (rows.length !== Number(countM[1]) ||
+      rows.reduce((s, r) => s + Math.round(r.amount * 100), 0) !== Math.abs(money(sumM[1])))) {
+    return {error:'Odczyt PDF Erste nie zgadza się z podsumowaniem banku — import zatrzymany, aby nie pominąć transakcji.'};
+  }
+  return rows.length ? { rows } : { error: 'Nie znaleziono wydatków w PDF z Erste Banku.' };
 }
 
 function _finishAnalyze(rawRows) {
