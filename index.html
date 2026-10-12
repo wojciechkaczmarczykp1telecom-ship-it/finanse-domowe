@@ -3155,7 +3155,7 @@ function receiptMoney(text) {
 function parseReceiptText(text) {
   const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const items = [], warnings = [];
-  let total = null, date = '', pending = '', ended = false;
+  let total = null, date = '', pending = '', ended = false, discounted = null;
   const dm = String(text).match(/\b(\d{2})[.\/-](\d{2})[.\/-](20\d{2})\b|\b(20\d{2})-(\d{2})-(\d{2})\b/);
   if (dm) date = dm[4] ? `${dm[4]}-${dm[5]}-${dm[6]}` : `${dm[3]}-${dm[2]}-${dm[1]}`;
   for (const line of lines) {
@@ -3175,13 +3175,23 @@ function parseReceiptText(text) {
       }
       continue;
     }
+    // Rabat nie jest osobną pozycją: obniża cenę produktu nad nim.
     if (/rabat|upust/.test(norm)) {
-      if (amounts.length && items.length) {
-        const discount = Math.abs(receiptMoney(amounts[amounts.length-1][0]));
-        items.push({name:line.replace(/[-−–]?\s*\d+[,.]\d{2}.*$/,'').trim() || 'Rabat', amount:-discount, category:items[items.length-1].category});
+      const prev = items[items.length-1];
+      const discount = amounts.length ? Math.abs(receiptMoney(amounts[0][0])) : NaN;
+      if (prev && Number.isFinite(discount)) {
+        prev.amount = amounts.length >= 2 ? receiptMoney(amounts[amounts.length-1][0]) : Math.round((prev.amount - discount) * 100) / 100;
+        discounted = prev;
       } else warnings.push('Sprawdź rabat: ' + line);
       pending=''; continue;
     }
+    // Cena po rabacie w osobnej linii pod rabatem — nadpisuje wyliczoną.
+    if (discounted && amounts.length && !/[a-ząćęłńóśźż]/i.test(line.slice(0, amounts[0].index))) {
+      const after = receiptMoney(amounts[amounts.length-1][0]);
+      if (Number.isFinite(after)) discounted.amount = after;
+      discounted = null; pending=''; continue;
+    }
+    discounted = null;
     if (amounts.length) {
       const last = amounts[amounts.length-1];
       let name = line.slice(0, amounts[0].index).replace(/\s+\d+\s*[x×*]\s*$/,'').trim();
