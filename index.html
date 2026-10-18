@@ -2922,6 +2922,14 @@ function parseErsteListRows(sortedRows) {
   return rows.length ? { rows } : { error: 'Nie znaleziono wydatków w PDF z Erste Banku.' };
 }
 
+// Paragon ma krótką nazwę („BIEDRONKA”), a reguła importu potrafi podstawić pełnego kontrahenta
+// („JMP S.A. BIEDRONKA 5526 WISNIOWA”) — porównujemy obie strony po cleanContractor (18.10.2026).
+function receiptShopMatches(receiptShop, row) {
+  const key = s => cleanContractor(s).toUpperCase();
+  const target = key(receiptShop);
+  return [row.shop, row.contractor].some(s => s && key(s) === target);
+}
+
 function _finishAnalyze(rawRows) {
   const sheet = _impPerson === 'Sylwia' ? 'Sylwia' : 'Wojtek';
 
@@ -2977,7 +2985,7 @@ function _finishAnalyze(rawRows) {
       const matches = fingerprints.filter(fp => fp.hasReceipt && !fp.transactionId &&
         Math.round(fp.amount * 100) === Math.round(r.amount * 100) &&
         Math.abs(new Date(fp.date) - new Date(r.date)) <= 3 * 86400000 &&
-        cleanContractor(fp.shop).toUpperCase() === r.shop.toUpperCase());
+        receiptShopMatches(fp.shop, r));
       if (matches.length === 1) { r.linkRow = matches[0].rowNum; return; }
       if (matches.length > 1) r.ambiguousReceipt = true;
       const key = baseKey(r);
