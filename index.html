@@ -845,7 +845,8 @@ const CAT_COLORS = {
   'PREZENTY':'#66BB6A', 'ODZIEŻ':'#D84315', 'DOM':'#1E88E5', 'APTEKA':'#2E7D32', 'LEKARZE':'#1565C0',
   'BADANIA':'#9E9D24', 'KOSMETYKI':'#8E24AA', 'UBEZPIECZENIA':'#A1887F', 'TELEKOMUNIKACJA':'#00897B',
   'PODATKI':'#6D4C41', 'PRACA':'#546E7A', 'WOLONTARIAT':'#FF7043', 'WYJAZDY/WCZASY':'#0288D1',
-  'INWESTYCJE':'#37474F', 'OSZCZĘDNOŚCI':'#00838F', 'PRZELEW WŁASNY':'#795548', 'BRAK KATEGORII':'#BDBDBD'
+  'INWESTYCJE':'#37474F', 'OSZCZĘDNOŚCI':'#00838F', 'PRZELEW WŁASNY':'#795548',
+  'MLEKO DZIECI':'#5C6BC0', 'OWOCE / WARZYWA - PAŁKA':'#7CB342', 'BRAK KATEGORII':'#BDBDBD'
 };
 const CAT_PALETTE = ['#3949AB','#00ACC1','#C0CA33','#F4511E','#6A1B9A','#5D4037','#AD1457','#0097A7'];
 let CATS = [], CAT_MAP = {};
@@ -989,6 +990,9 @@ function loadBudgetDash() {
   run('getBudgetDashboard', [S.year, S.month], renderBudgetCard, () => {});
 }
 
+// Jak NOT_SPENDING_CATEGORIES w Code.js: przenoszenie pieniędzy między swoimi kontami, nie wydatek.
+const NOT_SPENDING = ['PRZELEW WŁASNY'];
+
 function renderDash(d) {
   const el   = document.getElementById('dash-content');
   const sign = d.balance >= 0 ? '+' : '';
@@ -1003,7 +1007,7 @@ function renderDash(d) {
   [...CATS, ...archived].forEach(({n, c, old}) => {
     const amt = (d.byCategory && d.byCategory[n]) || 0;
     catHTML += `<div class="cat-tile" style="background:${c}" data-cat="${esc(n)}" onclick="showCatDetail(this.dataset.cat)">
-      <div class="cn">${esc(n)}${old ? ' · usunięta' : ''}</div>
+      <div class="cn">${esc(n)}${old ? ' · usunięta' : ''}${NOT_SPENDING.includes(n) ? ' · poza sumą' : ''}</div>
       <div class="ca ${amt===0?'zero':''}">${amt===0?'—':fmt(amt)}</div>
     </div>`;
   });
@@ -1151,6 +1155,17 @@ function changeCatItem(sel, sheetName, rowNum, idx, itemIndex) {
         if (arr === S.cachedDash?.expenseItems && S.cachedDash.byCategory) {
           S.cachedDash.byCategory[oldCat] = Math.max(0, (S.cachedDash.byCategory[oldCat]||0) - oldAmt);
           S.cachedDash.byCategory[newCat] = (S.cachedDash.byCategory[newCat]||0) + oldAmt;
+          // Przeniesienie do/z PRZELEW WŁASNY zmienia sumę wydatków (ta kategoria jest poza sumą).
+          const counted = c => !NOT_SPENDING.includes(c);
+          if (counted(oldCat) !== counted(newCat)) {
+            const delta = counted(newCat) ? oldAmt : -oldAmt;
+            S.cachedDash.totalExpenses += delta;
+            S.cachedDash.balance -= delta;
+            if (S.cachedDash.wojtekExpenses != null) {
+              if (sheetName === 'Sylwia') S.cachedDash.sylwiaExpenses += delta;
+              else S.cachedDash.wojtekExpenses += delta;
+            }
+          }
         }
       };
 
@@ -3218,7 +3233,8 @@ function guessCategory(text, product) {
     if (/biedronka|lidl|kaufland|carrefour|netto|\baldi\b|\bzabka\b/.test(s)) return 'SPOŻYWKA';
     return '';
   }
-  if (/pieluch|pampers|chust.*nawil|bebiko|bebilon|mleko.*junior/.test(s)) return 'DZIECI';
+  if (/bebiko|bebilon|mleko.*(junior|modyfik|nastepn)|\bnan (optipro|expert)|hipp combiotik|enfamil/.test(s)) return 'MLEKO DZIECI';
+  if (/pieluch|pampers|chust.*nawil/.test(s)) return 'DZIECI';
   if (/proszek.*pran|plyn.*(pran|naczyn|plukan)|kapsul.*(pran|zmyw)|domestos|worki.*smie|papier toalet|recznik papier|zmywak/.test(s)) return 'CHEMIA';
   if (/szampon|dezodorant|pasta.*zeb|zel.*(prysznic|myc)|mydlo/.test(s)) return 'KOSMETYKI';
   if (/mleko|chleb|bulka|bulki|maslo|jaj[ako]|jaja|jajka|ser\b|serek|jogurt|kefir|smietan|twarog|ryz|makaron|kasza|maka|cukier\b|sol\b|oliwa|olej|kurcz|mieso|szynka|kielbas|schab|wolow|losos|tunczyk|pomidor|ogorek|ziemniak|marchew|cebula|salata|papryka|jablk|banan|gruszk|truskawk|malin|cytryn|pomarancz|woda\b|kawa\b|herbata|sok\b|platki owsiane|brokul/.test(s)) return 'SPOŻYWKA';
