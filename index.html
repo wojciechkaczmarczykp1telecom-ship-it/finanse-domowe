@@ -2648,7 +2648,11 @@ async function parseIngPdf(file) {
       return { page, y, items: sorted, text: sorted.map(i => i.text).join(' ').trim() };
     });
 
-  if (sortedRows.some(row => /Erste Bank Polska/i.test(row.text))) return parseErsteRows(sortedRows);
+  // Erste rozpoznajemy po układzie „Historii rachunku”, nie po samej nazwie banku:
+  // na liście transakcji ING „Erste Bank Polska S.A.” pojawia się jako bank kontrahenta.
+  const hasRow = re => sortedRows.some(row => re.test(row.text));
+  if (hasRow(/Zestawienie operacji/i) && hasRow(/Podsumowanie końcowe/i) && hasRow(/Erste Bank Polska/i))
+    return parseErsteRows(sortedRows);
 
   const dateAnyRe = /(\d{4}-\d{2}-\d{2}|\d{2}[.\-]\d{2}[.\-]\d{4})/;
   const negAmtRe  = /[-−–]\s*(\d[\d\s]*[,]\d{2})/g;
