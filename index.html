@@ -720,13 +720,13 @@ body{
 <div id="v-import" class="view scroll-area">
   <div id="import-step1">
     <div class="card">
-      <div class="card-title">🧾 Screeny paragonu z Biedronki</div>
-      <p class="receipt-help">Wybierz screeny <strong>jednego paragonu</strong>, od góry do dołu, z widoczną datą i kwotą końcową. Odczyt odbywa się na Twoim urządzeniu. Przed zapisem sprawdzisz produkty i połączysz je z płatnością z banku.</p>
+      <div class="card-title">🧾 Paragon z Biedronki — screeny lub PDF</div>
+      <p class="receipt-help">Wybierz screeny <strong>jednego paragonu</strong> (od góry do dołu, z widoczną datą i kwotą końcową) albo PDF paragonu z aplikacji Biedronki — znajdziesz go w Pobranych lub Dokumentach. Odczyt odbywa się na Twoim urządzeniu. Przed zapisem sprawdzisz produkty i połączysz je z płatnością z banku.</p>
       <label class="flabel" for="receipt-person">Kto zapłacił?</label>
       <select id="receipt-person" class="finput"><option>Wojtek</option><option>Sylwia</option></select>
-      <label class="flabel" for="receipt-files">Screeny PNG, JPG lub WebP</label>
-      <input type="file" id="receipt-files" accept="image/png,image/jpeg,image/webp" multiple class="finput">
-      <button class="btn-submit" id="receipt-read" onclick="analyzeReceiptImages()">Odczytaj screeny</button>
+      <label class="flabel" for="receipt-files">Screeny (PNG, JPG, WebP) lub PDF</label>
+      <input type="file" id="receipt-files" accept="image/png,image/jpeg,image/webp,application/pdf,.pdf" multiple class="finput">
+      <button class="btn-submit" id="receipt-read" onclick="analyzeReceiptImages()">Odczytaj paragon</button>
       <p id="receipt-progress" class="receipt-help" role="status"></p>
       <details><summary>Wklej tekst paragonu lub wpisz produkty</summary>
         <textarea id="receipt-text" class="finput" rows="6" placeholder="Nazwa produktu 9,99&#10;Razem 9,99"></textarea>
@@ -3269,6 +3269,8 @@ function parseReceiptText(text) {
     }
     if (pending === '__TOTAL__' && amounts.length) { total = receiptMoney(amounts[amounts.length-1][0]); pending=''; continue; }
     if (ended) continue;
+    // Paragon fiskalny (PDF): podsumowanie podatku przed „SUMA PLN” kończy listę produktów.
+    if (/^(sprzedaz opodatk|ptu\b|suma ptu|kwota ptu|podatek ptu)/.test(norm)) { ended = true; pending=''; continue; }
     if (/paragon|biedronka|jeronimo|martins|\bnip\b|^data|^godzina|^nr\b|^numer|^sklep|^adres|kasjer|kasa\b|dziekuj|szczegoly|twoje zakupy|lista produkt|^\d{2}[.\/-]\d{2}[.\/-]20\d{2}|^20\d{2}-\d{2}-\d{2}|^\d{2}:\d{2}|^ul\.|^\d{2}-\d{3}|cena jednostkowa|^cena za|oszczedz|^suma rabat/.test(norm)) { pending=''; continue; }
     if (/^\d+(?:[,.]\d+)?\s*(?:szt\.?|kg)?\s*[x×*]/i.test(line)) {
       if (pending && amounts.length >= 2) {
@@ -3296,7 +3298,7 @@ function parseReceiptText(text) {
     discounted = null;
     if (amounts.length) {
       const last = amounts[amounts.length-1];
-      let name = line.slice(0, amounts[0].index).replace(/\s+\d+\s*[x×*]\s*$/,'').trim();
+      let name = line.slice(0, amounts[0].index).replace(/\s+\d+(?:[,.]\d+)?\s*[x×*]\s*$/,'').trim();
       if (!/[a-ząćęłńóśźż]/i.test(name)) name = pending;
       const amount = receiptMoney(last[0]);
       if (name && Number.isFinite(amount) && amount !== 0) items.push({name, amount, category:suggestCategory(name,true)});
@@ -3313,28 +3315,90 @@ let _receipt = null;
 let _receiptImages = [];
 function apiPromise(fn, args) { return new Promise((resolve,reject) => run(fn,args,resolve,reject)); }
 
+// Android pokazuje Pobrane/Dokumenty tylko wtedy, gdy pole przyjmuje coś poza obrazami; część menedżerów plików nie podaje typu PDF.
+function receiptFileKind(file) {
+  if (/^image\/(png|jpeg|webp)$/.test(file.type)) return 'image';
+  if (file.type === 'application/pdf' || ((!file.type || file.type === 'application/octet-stream') && /\.pdf$/i.test(file.name || ''))) return 'pdf';
+  return '';
+}
+
+// Elementy tekstu jednej strony PDF → linie jak z OCR (od góry, w linii od lewej).
+function receiptPdfLines(items) {
+  const lines = [];
+  items.filter(it => String(it.str || '').trim()).forEach(it => {
+    const item = {...it, str: fixPdfPolish(String(it.str))};
+    const line = lines.find(l => Math.abs(l.y - item.y) <= 2);
+    if (line) line.items.push(item); else lines.push({y: item.y, items: [item]});
+  });
+  return lines.sort((a,b) => b.y - a.y).map(l => {
+    const parts = l.items.sort((a,b) => a.x - b.x);
+    return parts.reduce((s, it, i) => {
+      const prev = parts[i-1];
+      return !prev ? it.str : s + (it.x - (prev.x + prev.w) < 1 ? '' : ' ') + it.str;
+    }, '').replace(/\s+/g,' ').trim();
+  }).filter(Boolean);
+}
+
+// PDF z aplikacji ma warstwę tekstu — czytamy ją bez OCR; strona-skan idzie do OCR jak screen.
+async function readReceiptPdf(file, onStatus, ocrPage) {
+  const pdfjsLib = window.pdfjsLib;
+  if (!pdfjsLib) throw new Error('Biblioteka PDF.js niedostępna — odśwież stronę.');
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    ['https:', '', 'cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'].join('/');
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pages = Math.min(pdf.numPages, 10), lines = [], images = [];
+  for (let p = 1; p <= pages; p++) {
+    onStatus(`PDF: strona ${p} z ${pages}…`);
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    let pageLines = receiptPdfLines(tc.items.map(it => ({str: it.str, x: it.transform[4], y: it.transform[5], w: it.width})));
+    const viewport = page.getViewport({scale: 2});
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
+    await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (blob) images.push(URL.createObjectURL(blob));
+    if (pageLines.filter(l => /\d[,.]\d{2}(?!\d)/.test(l)).length < 2 && blob)
+      pageLines = String(await ocrPage(blob)).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    lines.push(...pageLines);
+  }
+  return {lines, images};
+}
+
 async function analyzeReceiptImages() {
   const files = [...document.getElementById('receipt-files').files];
-  if (!files.length) return toast('Wybierz screen paragonu.', 'err');
-  if (files.length > 12 || files.some(f => f.size > 20 * 1024 * 1024 || !/^image\/(png|jpeg|webp)$/.test(f.type)))
-    return toast('Wybierz do 12 screenów PNG/JPG/WebP, do 20 MB każdy.', 'err');
+  if (!files.length) return toast('Wybierz screen lub PDF paragonu.', 'err');
+  if (files.length > 12 || files.some(f => f.size > 20 * 1024 * 1024 || !receiptFileKind(f)))
+    return toast('Wybierz do 12 plików: screeny PNG/JPG/WebP lub PDF, do 20 MB każdy.', 'err');
   const button=document.getElementById('receipt-read'), status=document.getElementById('receipt-progress');
   button.disabled=true; status.textContent='Przygotowuję odczyt…';
   let worker;
-  try {
+  // Tesseract tylko gdy jest co odczytać z obrazu — PDF z tekstem go nie pobiera.
+  const getWorker = async () => {
+    if (worker) return worker;
     if (!window.Tesseract) await new Promise((resolve,reject) => {
       const script=document.createElement('script'); script.src=['https:', '', 'cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/tesseract.min.js'].join('/');
       script.onload=resolve; script.onerror=() => reject(new Error('Nie udało się pobrać modułu odczytu. Sprawdź internet lub wklej tekst paragonu.')); document.head.appendChild(script);
     });
-    worker=await Tesseract.createWorker('pol',1,{logger: m => { if(m.status==='recognizing text') status.textContent=`Odczytuję screen… ${Math.round(m.progress*100)}%`; }});
+    worker=await Tesseract.createWorker('pol',1,{logger: m => { if(m.status==='recognizing text') status.textContent=`Odczytuję obraz… ${Math.round(m.progress*100)}%`; }});
+    return worker;
+  };
+  try {
     const texts=[], hashes=[];
     _receiptImages.forEach(url => URL.revokeObjectURL(url)); _receiptImages=[];
     for (let i=0;i<files.length;i++) {
-      status.textContent=`Screen ${i+1} z ${files.length}…`;
+      status.textContent=`Plik ${i+1} z ${files.length}…`;
       const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256', await files[i].arrayBuffer()))].map(b => b.toString(16).padStart(2,'0')).join('');
       if (hashes.includes(hash)) continue;
-      hashes.push(hash); _receiptImages.push(URL.createObjectURL(files[i]));
-      const result=await worker.recognize(files[i]); texts.push(result.data.text);
+      hashes.push(hash);
+      if (receiptFileKind(files[i]) === 'pdf') {
+        const {lines, images} = await readReceiptPdf(files[i], s => status.textContent = s,
+          async blob => (await (await getWorker()).recognize(blob)).data.text);
+        _receiptImages.push(...images); texts.push(lines.join('\n'));
+      } else {
+        _receiptImages.push(URL.createObjectURL(files[i]));
+        const result=await (await getWorker()).recognize(files[i]); texts.push(result.data.text);
+      }
     }
     // Usuwamy wyłącznie identyczną, co najmniej dwuliniową zakładkę między screenami.
     let combined=[];
@@ -3368,7 +3432,7 @@ function openReceiptEditor(data) {
   el.innerHTML=`<div class="card-title">Sprawdź podział zakupu · ${esc(data.person)}</div>
     <p class="receipt-help">Suma produktów musi zgadzać się z płatnością. Kwoty produktów wpisuj za całą kupioną ilość, po rabatach. Rabat możesz wpisać jako osobną kwotę ujemną. Nieznaną pozycję możesz zostawić bez kategorii.</p>
     ${(data.warnings || []).length ? `<p class="receipt-help">${esc(data.warnings.join('\n'))}</p>` : ''}
-    <details class="receipt-preview"><summary>Pokaż screeny źródłowe</summary>${_receiptImages.map(url => `<img src="${url}" alt="Screen paragonu">`).join('')}</details>
+    <details class="receipt-preview"><summary>Pokaż źródło paragonu</summary>${_receiptImages.map(url => `<img src="${url}" alt="Paragon">`).join('')}</details>
     <div class="receipt-grid"><label>Data paragonu<input id="rc-date" type="date" class="finput" value="${esc(data.date)}" onchange="invalidateReceiptMatch()" ${data.rowNum ? 'readonly' : ''}></label>
     <label>Kwota zapłacona<input id="rc-total" type="number" step="0.01" class="finput" value="${data.total || ''}" oninput="invalidateReceiptMatch();updateReceiptSum()" ${data.rowNum ? 'readonly' : ''}></label></div>
     <label>Sklep<input id="rc-shop" class="finput" value="${esc(data.shop || '')}"></label>
