@@ -3269,8 +3269,9 @@ function parseReceiptText(text) {
     }
     if (pending === '__TOTAL__' && amounts.length) { total = receiptMoney(amounts[amounts.length-1][0]); pending=''; continue; }
     if (ended) continue;
-    // Paragon fiskalny (PDF): podsumowanie podatku przed „SUMA PLN” kończy listę produktów.
-    if (/^(sprzedaz opodatk|ptu\b|suma ptu|kwota ptu|podatek ptu)/.test(norm)) { ended = true; pending=''; continue; }
+    // Paragon fiskalny (PDF): „OPUSTY ŁĄCZNIE” i podsumowanie podatku przed „SUMA PLN” kończą listę produktów
+    // (opusty są już odjęte przy produktach — nie wolno ich odjąć drugi raz).
+    if (/^(sprzedaz opodatk|ptu\b|suma ptu|kwota ptu|podatek ptu|opusty\s*laczn|rabaty\s*laczn)/.test(norm)) { ended = true; pending=''; continue; }
     if (/paragon|biedronka|jeronimo|martins|\bnip\b|^data|^godzina|^nr\b|^numer|^sklep|^adres|kasjer|kasa\b|dziekuj|szczegoly|twoje zakupy|lista produkt|^\d{2}[.\/-]\d{2}[.\/-]20\d{2}|^20\d{2}-\d{2}-\d{2}|^\d{2}:\d{2}|^ul\.|^\d{2}-\d{3}|cena jednostkowa|^cena za|oszczedz|^suma rabat/.test(norm)) { pending=''; continue; }
     if (/^\d+(?:[,.]\d+)?\s*(?:szt\.?|kg)?\s*[x×*]/i.test(line)) {
       if (pending && amounts.length >= 2) {
@@ -3279,8 +3280,8 @@ function parseReceiptText(text) {
       }
       continue;
     }
-    // Rabat nie jest osobną pozycją: obniża cenę produktu nad nim.
-    if (/rabat|upust/.test(norm)) {
+    // Rabat nie jest osobną pozycją: obniża cenę produktu nad nim. Biedronka pisze „Opust” (OCR bywa „Opus”).
+    if (/rabat|upust|opust|^opus\b/.test(norm)) {
       const prev = items[items.length-1];
       const discount = amounts.length ? Math.abs(receiptMoney(amounts[0][0])) : NaN;
       if (prev && Number.isFinite(discount)) {
@@ -3298,7 +3299,10 @@ function parseReceiptText(text) {
     discounted = null;
     if (amounts.length) {
       const last = amounts[amounts.length-1];
-      let name = line.slice(0, amounts[0].index).replace(/\s+\d+(?:[,.]\d+)?\s*[x×*]\s*$/,'').trim();
+      // Paragon fiskalny: „Nazwa PTU Ilość Cena” — litera PTU (OCR: „Cc”, „(e)”), ilość i cena jedn. bez przecinka nie należą do nazwy.
+      let name = line.slice(0, amounts[0].index)
+        .replace(/\s+\(?[A-G]c?\)?\s+\d+(?:[,.]\d+)?\s*[x×*](?:\s*\d+)?\s*$/i,'')
+        .replace(/\s+\d+(?:[,.]\d+)?\s*[x×*]\s*$/,'').replace(/\s+[^\p{L}\p{N}]+$/u,'').trim();
       if (!/[a-ząćęłńóśźż]/i.test(name)) name = pending;
       const amount = receiptMoney(last[0]);
       if (name && Number.isFinite(amount) && amount !== 0) items.push({name, amount, category:suggestCategory(name,true)});
@@ -3339,7 +3343,15 @@ function receiptPdfLines(items) {
   }).filter(Boolean);
 }
 
-// PDF z aplikacji ma warstwę tekstu — czytamy ją bez OCR; strona-skan idzie do OCR jak screen.
+async function renderPdfPage(page, scale) {
+  const viewport = page.getViewport({scale});
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
+  await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+  return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+}
+
+// PDF z warstwą tekstu czytamy bez OCR; strona-obraz (tak wygląda e-paragon Biedronki) idzie do OCR jak screen.
 async function readReceiptPdf(file, onStatus, ocrPage) {
   const pdfjsLib = window.pdfjsLib;
   if (!pdfjsLib) throw new Error('Biblioteka PDF.js niedostępna — odśwież stronę.');
@@ -3352,14 +3364,16 @@ async function readReceiptPdf(file, onStatus, ocrPage) {
     const page = await pdf.getPage(p);
     const tc = await page.getTextContent();
     let pageLines = receiptPdfLines(tc.items.map(it => ({str: it.str, x: it.transform[4], y: it.transform[5], w: it.width})));
-    const viewport = page.getViewport({scale: 2});
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
-    await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    const blob = await renderPdfPage(page, 2);
     if (blob) images.push(URL.createObjectURL(blob));
-    if (pageLines.filter(l => /\d[,.]\d{2}(?!\d)/.test(l)).length < 2 && blob)
-      pageLines = String(await ocrPage(blob)).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (pageLines.filter(l => /\d[,.]\d{2}(?!\d)/.test(l)).length < 2) {
+      // PDF z Biedronki to obraz wąskiego paragonu: przy skali 2 (440 px) OCR gubi przecinki w cenach.
+      // Do OCR ok. 1200 px szerokości, ale do 14 mln pikseli (limit płótna w telefonach).
+      const base = page.getViewport({scale: 1});
+      const scale = Math.max(2, Math.min(1200 / base.width, Math.sqrt(14e6 / (base.width * base.height))));
+      const ocrBlob = await renderPdfPage(page, scale);
+      if (ocrBlob) pageLines = String(await ocrPage(ocrBlob)).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    }
     lines.push(...pageLines);
   }
   return {lines, images};
