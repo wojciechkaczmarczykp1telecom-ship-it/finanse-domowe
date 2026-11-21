@@ -480,6 +480,9 @@ body{
 .inv-cat-row:last-child{border-bottom:none}
 .inv-cat-name{flex:1;min-width:0;overflow-wrap:anywhere;font-size:14px;font-weight:600}
 .savings-category-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.cd-actions{display:flex;align-items:stretch;gap:8px}
+.cd-actions .cd-select{flex:1;min-width:0}
+.cd-actions .btn-sm{white-space:nowrap}
 .savings-category-add{display:flex;gap:8px;margin:10px 0 16px}
 .savings-category-add input{flex:1;min-width:0;font-size:14px;padding:10px 12px}
 .ecat-list{display:flex;flex-wrap:wrap;gap:6px}
@@ -902,6 +905,7 @@ let savingsCategoriesEditable = false;
 let savingsReady = false;
 let savingsBusy = false;
 let savingsLoadId = 0;
+let dashLoadId = 0;
 
 /* ════════════════════════════════════════════════
    INIT
@@ -981,30 +985,27 @@ function updateLabels() {
    DASHBOARD
 ════════════════════════════════════════════════ */
 function loadDash() {
+  const loadId = ++dashLoadId;
   const requestKey = `${S.person}|${S.year}|${S.month}|${S.period}`;
+  const currentRequest = () => loadId === dashLoadId && requestKey === `${S.person}|${S.year}|${S.month}|${S.period}`;
   const el = document.getElementById('dash-content');
   el.innerHTML = '<div class="loading"><div class="spinner"></div>Ładowanie…</div>';
 
   const onErr = err => {
+    if (!currentRequest()) return;
     el.innerHTML = `<div class="empty"><div class="empty-ico">⚠️</div>${esc(err.message||err)}</div>`;
+    if (_cdCat !== null && !S.cachedDash) renderCatDetail();
   };
-
-  if (S.period === 'year') {
-    run('getAnnualSummary', [S.person, S.year], data => {
-      if (requestKey !== `${S.person}|${S.year}|${S.month}|${S.period}`) return;
-      S.cachedDash = data; renderDash(data);
-    }, onErr);
-  } else if (S.person === 'razem') {
-    run('getMonthlySummaryBoth', [S.year, S.month], data => {
-      if (requestKey !== `${S.person}|${S.year}|${S.month}|${S.period}`) return;
-      S.cachedDash = data; renderDash(data); loadBudgetDash();
-    }, onErr);
-  } else {
-    run('getMonthlySummary', [S.person, S.year, S.month], data => {
-      if (requestKey !== `${S.person}|${S.year}|${S.month}|${S.period}`) return;
-      S.cachedDash = data; renderDash(data); loadBudgetDash();
-    }, onErr);
-  }
+  const onLoaded = data => {
+    if (!currentRequest()) return;
+    S.cachedDash = data;
+    renderDash(data);
+    if (_cdCat !== null) renderCatDetail();
+    if (S.period !== 'year') loadBudgetDash();
+  };
+  if (S.period === 'year') run('getAnnualSummary', [S.person, S.year], onLoaded, onErr);
+  else if (S.person === 'razem') run('getMonthlySummaryBoth', [S.year, S.month], onLoaded, onErr);
+  else run('getMonthlySummary', [S.person, S.year, S.month], onLoaded, onErr);
 }
 
 function loadBudgetDash() {
@@ -1123,7 +1124,7 @@ function renderCatDetail() {
 
   if (!items.length) {
     body.innerHTML = '<div class="empty"><div class="empty-ico">📭</div>Brak wydatków w tej kategorii</div>';
-    meta.textContent = MONTHS_PL[S.month-1] + ' ' + S.year + ' • 0 transakcji';
+    meta.textContent = `${S.period === 'year' ? 'Rok' : MONTHS_PL[S.month-1]} ${S.year} • 0 transakcji`;
     return;
   }
 
@@ -1145,10 +1146,16 @@ function renderCatDetail() {
         </div>
         <span class="cd-amt">−${fmt(item.amount)}</span>
       </div>
-      <select class="cd-select"
-              onchange="changeCatItem(this,'${item.sheetName}',${item.rowNum},${idx},${Number.isInteger(item.itemIndex) ? item.itemIndex : 'null'})">
-        ${catOptions}
-      </select>
+      <div class="cd-actions">
+        <select class="cd-select" aria-label="Kategoria wydatku"
+                onchange="changeCatItem(this,'${item.sheetName}',${item.rowNum},${idx},${item.itemIndex ?? 'null'})">
+          ${catOptions}
+        </select>
+        <button class="btn-sm btn-sm-danger" type="button"
+                onclick="askCategoryExpenseDelete('${item.sheetName}',${item.rowNum},${item.itemIndex ?? 'null'})">
+          ${Number.isInteger(item.itemIndex) ? 'Usuń płatność' : 'Usuń'}
+        </button>
+      </div>
     </div>`;
   }).join('');
 }
@@ -1459,10 +1466,33 @@ function loadBudgetPreview() {
    DELETE / CONFIRM
 ════════════════════════════════════════════════ */
 let _pendingDelete = null;
+let _deleteInFlight = false;
 
-function askDelete(type, sheetName, rowNum, label) {
-  _pendingDelete = { type, sheetName, rowNum };
-  document.getElementById('confirm-desc').textContent = `„${label}" zostanie usunięte z arkusza. Tego nie można cofnąć.`;
+function askCategoryExpenseDelete(sheetName, rowNum, itemIndex) {
+  const item = S.cachedDash?.expenseItems?.find(expense =>
+    expense.sheetName === sheetName && expense.rowNum === rowNum && (expense.itemIndex ?? null) === itemIndex);
+  if (!item) return;
+  const expected = {
+    date: item.date,
+    amount: item.parentAmount ?? item.amount,
+    shop: item.shop,
+    transactionId: item.transactionId || ''
+  };
+  if (!Number.isInteger(itemIndex)) expected.details = item.details;
+  const receipt = Number.isInteger(itemIndex) || Boolean(item.receipt);
+  const amount = fmt(expected.amount);
+  const label = receipt
+    ? `Cała płatność (${amount}) wraz z paragonem i wszystkimi produktami`
+    : `Wydatek „${item.details || item.shop || item.category}” (${amount})`;
+  askDelete('exp', sheetName, rowNum, label, expected);
+}
+
+function askDelete(type, sheetName, rowNum, label, expected) {
+  if (_deleteInFlight) return;
+  _pendingDelete = { type, sheetName, rowNum, expected };
+  document.getElementById('confirm-desc').textContent = expected
+    ? `${label} — usunąć z arkusza? Tego nie można cofnąć.`
+    : `„${label}” zostanie usunięte z arkusza. Tego nie można cofnąć.`;
   document.getElementById('confirm-overlay').classList.add('show');
   document.getElementById('btn-confirm-del').onclick = confirmDelete;
 }
@@ -1474,7 +1504,7 @@ function closeConfirm() {
 
 function confirmDelete() {
   if (!_pendingDelete) return;
-  const { type, sheetName, rowNum } = _pendingDelete;
+  const { type, sheetName, rowNum, expected } = _pendingDelete;
   closeConfirm();
 
   if (type === 'debt') {
@@ -1490,18 +1520,27 @@ function confirmDelete() {
   }
 
   const fn = type === 'exp' ? 'deleteExpense' : 'deleteIncome';
-  run(fn, [sheetName, rowNum], res => {
+  _deleteInFlight = true;
+  run(fn, expected ? [sheetName, rowNum, expected] : [sheetName, rowNum], res => {
+    _deleteInFlight = false;
     if (res && res.success) {
       toast('✓ Usunięto', 'ok');
       S.cachedHist = null;
       S.cachedDash = null;
+      if (_cdCat !== null) {
+        document.getElementById('cd-body').innerHTML = '<div class="loading"><div class="spinner"></div>Ładowanie…</div>';
+        document.getElementById('cd-meta').textContent = '';
+      }
       loadHist();
       loadDash();
     } else {
       // Błąd serwera zwracany jako {success:false} — pokazujemy go, żeby awaria nie była cicha.
       toast('Błąd: ' + ((res && res.error) || 'Nie udało się usunąć wpisu.'), 'err');
     }
-  }, err => toast('Błąd: ' + (err.message||err), 'err'));
+  }, err => {
+    _deleteInFlight = false;
+    toast('Błąd: ' + (err.message||err), 'err');
+  });
 }
 
 /* ════════════════════════════════════════════════
@@ -1633,19 +1672,21 @@ function loadSavings() {
   const loadId = ++savingsLoadId;
   savingsReady = false;
   syncSavingsControls();
-  run('getSavings', [], data => {
-    if (loadId !== savingsLoadId) return;
-    renderSavings(data);
-    savingsReady = true;
-    syncSavingsControls();
-  }, () => {
+  const showFailure = () => {
     if (loadId !== savingsLoadId) return;
     document.getElementById('savings-content').innerHTML = `
       <p style="font-size:13px;padding:12px 0">Nie można załadować oszczędności</p>
       <button class="btn-sm btn-sm-ghost" onclick="loadSavings()">Spróbuj ponownie</button>`;
     document.getElementById('savings-form').classList.remove('open');
     document.getElementById('savings-edit-form').classList.remove('open');
-  });
+  };
+  run('getSavings', [], data => {
+    if (loadId !== savingsLoadId) return;
+    if (!data || data.error) return showFailure();
+    renderSavings(data);
+    savingsReady = true;
+    syncSavingsControls();
+  }, showFailure);
 }
 
 function savingsFields() {
@@ -1741,9 +1782,13 @@ function saveSavingsEntries(mode) {
   savingsFields().forEach((cat, i) => {
     const value = document.getElementById(`sv-${mode}-${i}`).value;
     if (value === '') return;
-    const amount = edit ? round2(Number(value) - (Number(savingsTotals[cat.id]) || 0)) : Number(value);
+    const balance = Number(savingsTotals[cat.id]) || 0;
+    const amount = edit ? round2(Number(value) - balance) : Number(value);
     const detail = edit ? 'korekta stanu' : document.getElementById(`sv-add-${i}-detail`).value.trim();
-    if (amount !== 0) entries.push({ type: cat.id, amount, detail });
+    if (amount === 0) return;
+    const entry = { type: cat.id, amount, detail };
+    if (edit) entry.expectedBalance = balance;
+    entries.push(entry);
   });
   if (!entries.length) {
     return toast(edit ? 'Wartości bez zmian' : 'Wpisz przynajmniej jedną kwotę', edit ? 'ok' : 'err');
