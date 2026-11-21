@@ -478,7 +478,10 @@ body{
   padding:8px 0;border-bottom:1px solid var(--border);
 }
 .inv-cat-row:last-child{border-bottom:none}
-.inv-cat-name{flex:1;font-size:14px;font-weight:600}
+.inv-cat-name{flex:1;min-width:0;overflow-wrap:anywhere;font-size:14px;font-weight:600}
+.savings-category-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.savings-category-add{display:flex;gap:8px;margin:10px 0 16px}
+.savings-category-add input{flex:1;min-width:0;font-size:14px;padding:10px 12px}
 .ecat-list{display:flex;flex-wrap:wrap;gap:6px}
 .ecat-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 6px 5px 10px;border:1px solid var(--border);border-radius:16px;font-size:12px;font-weight:600}
 .ecat-chip i{width:10px;height:10px;border-radius:50%;flex:none}
@@ -632,9 +635,9 @@ body{
     <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
       <span>💎 Oszczędności i inwestycje</span>
       <div style="display:flex;gap:5px">
-        <button class="btn-sm btn-sm-ghost" onclick="toggleSavingsEdit()">✏️ Edytuj</button>
-        <button class="btn-sm btn-sm-ghost" onclick="toggleSavingsForm()">➕ Dodaj</button>
-        <button class="btn-sm btn-sm-ghost" onclick="toggleCatManager()" title="Zarządzaj kategoriami inwestycji">⚙️</button>
+        <button id="savings-edit-btn" class="btn-sm btn-sm-ghost" onclick="toggleSavingsEdit()" disabled>✏️ Edytuj</button>
+        <button id="savings-add-btn" class="btn-sm btn-sm-ghost" onclick="toggleSavingsForm()" disabled>➕ Dodaj</button>
+        <button id="savings-category-btn" class="btn-sm btn-sm-ghost" onclick="toggleCatManager()" title="Zarządzaj kategoriami" aria-label="Zarządzaj kategoriami" disabled>⚙️</button>
       </div>
     </div>
     <div id="savings-content">
@@ -647,16 +650,25 @@ body{
     <!-- FORMULARZ: EDYTUJ AKTUALNY STAN (generowany dynamicznie) -->
     <div class="budget-form" id="savings-edit-form" style="margin-top:12px"></div>
 
-    <!-- MENADŻER KATEGORII INWESTYCJI -->
     <div class="budget-form" id="cat-manager" style="margin-top:12px">
-      <div class="flabel" style="margin-bottom:10px">📈 Kategorie inwestycji</div>
-      <div id="inv-cat-list"></div>
-      <div style="display:flex;gap:8px;margin-top:10px">
-        <input type="text" id="new-cat-input" class="finput"
-               placeholder="Nowa kategoria (np. Bitcoin, Złoto…)"
-               style="flex:1;font-size:14px;padding:10px 12px">
-        <button class="btn-sm btn-sm-primary" onclick="addInvestCat()">Dodaj</button>
-      </div>
+      <fieldset id="savings-category-controls" style="border:0;min-width:0">
+        <section id="savings-category-manager" hidden>
+          <div class="flabel">🏦 Kategorie oszczędności</div>
+          <div id="savings-category-list"></div>
+          <form class="savings-category-add" onsubmit="event.preventDefault(); addSavingsCategory()">
+            <input type="text" id="new-savings-category" class="finput" aria-label="Nazwa nowej kategorii oszczędności"
+                   placeholder="np. Poduszka finansowa" maxlength="60" required>
+            <button class="btn-sm btn-sm-primary" type="submit">Dodaj</button>
+          </form>
+        </section>
+        <div class="flabel" style="margin-bottom:10px">📈 Kategorie inwestycji</div>
+        <div id="inv-cat-list"></div>
+        <form class="savings-category-add" onsubmit="event.preventDefault(); addInvestCat()">
+          <input type="text" id="new-cat-input" class="finput" aria-label="Nazwa nowej kategorii inwestycji"
+                 placeholder="np. Bitcoin, złoto" required>
+          <button class="btn-sm btn-sm-primary" type="submit">Dodaj</button>
+        </form>
+      </fieldset>
       <button class="btn-sm btn-sm-ghost" style="margin-top:8px" onclick="toggleCatManager()">Zamknij</button>
     </div>
   </div>
@@ -879,8 +891,17 @@ const S = {
 };
 
 // Oszczędności — dynamiczny stan
-const _savTotals = {};   // type → suma
-let   _investCats = [];  // lista kategorii inwestycji
+const DEFAULT_SAVINGS_CATEGORIES = [
+  { id: 'konto', name: 'Konto oszczędnościowe' },
+  { id: 'gotówka', name: 'Gotówka' }
+];
+let savingsTotals = Object.create(null);
+let savingsCategories = DEFAULT_SAVINGS_CATEGORIES;
+let investCategories = [];
+let savingsCategoriesEditable = false;
+let savingsReady = false;
+let savingsBusy = false;
+let savingsLoadId = 0;
 
 /* ════════════════════════════════════════════════
    INIT
@@ -1595,335 +1616,230 @@ function loadMore() {
   renderExpenseCatList();
   initPinAdmin();
   loadBudgetPreview();
-  run('getSavings', [], renderSavings,
-    () => { document.getElementById('savings-content').innerHTML =
-      '<p style="color:#999;font-size:13px;text-align:center;padding:12px">Nie można załadować</p>'; });
+  loadSavings();
 
   run('getDebts', [], renderDebts,
     () => { document.getElementById('debts-content').innerHTML =
       '<p style="color:#999;font-size:13px;text-align:center;padding:12px">Nie można załadować</p>'; });
 }
 
-// Helper: bezpieczny ID z nazwy kategorii
-function catId(name) {
-  return (name || '').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+function syncSavingsControls() {
+  for (const id of ['savings-edit-btn', 'savings-add-btn', 'savings-category-btn', 'savings-category-controls']) {
+    document.getElementById(id).disabled = !savingsReady || savingsBusy;
+  }
 }
 
-/* ── Renderowanie stanu oszczędności ── */
-function renderSavings(d) {
-  // d = { totals: {konto, gotówka, 'USDC/Binance', ...}, categories: [...] }
-  _investCats = Array.isArray(d.categories) ? d.categories : ['USDC/Binance'];
-
-  // Zaktualizuj _savTotals
-  Object.keys(_savTotals).forEach(k => delete _savTotals[k]);
-  _savTotals['konto']   = (d.totals && d.totals['konto'])   || 0;
-  _savTotals['gotówka'] = (d.totals && d.totals['gotówka']) || 0;
-  _investCats.forEach(c => { _savTotals[c] = (d.totals && d.totals[c]) || 0; });
-
-  const totalAll = Object.values(_savTotals).reduce((s, v) => s + v, 0);
-
-  let rows = `
-    <div class="stat-row">
-      <span class="stat-lbl">🏦 Konto oszczędnościowe</span>
-      <span class="stat-val">${fmt(_savTotals['konto'])}</span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-lbl">💵 Gotówka</span>
-      <span class="stat-val">${fmt(_savTotals['gotówka'])}</span>
-    </div>`;
-
-  _investCats.forEach(cat => {
-    rows += `<div class="stat-row">
-      <span class="stat-lbl">📈 ${esc(cat)}</span>
-      <span class="stat-val">${fmt(_savTotals[cat] || 0)}</span>
-    </div>`;
+function loadSavings() {
+  const loadId = ++savingsLoadId;
+  savingsReady = false;
+  syncSavingsControls();
+  run('getSavings', [], data => {
+    if (loadId !== savingsLoadId) return;
+    renderSavings(data);
+    savingsReady = true;
+    syncSavingsControls();
+  }, () => {
+    if (loadId !== savingsLoadId) return;
+    document.getElementById('savings-content').innerHTML = `
+      <p style="font-size:13px;padding:12px 0">Nie można załadować oszczędności</p>
+      <button class="btn-sm btn-sm-ghost" onclick="loadSavings()">Spróbuj ponownie</button>`;
+    document.getElementById('savings-form').classList.remove('open');
+    document.getElementById('savings-edit-form').classList.remove('open');
   });
-
-  rows += `<div class="stat-total">
-    <span class="lbl">RAZEM</span>
-    <span class="val">${fmt(totalAll)}</span>
-  </div>`;
-
-  document.getElementById('savings-content').innerHTML = rows;
-  buildSavingsForms();
 }
 
-/* ── Budowanie formularzy (dynamicznie wg kategorii) ── */
-function buildSavingsForms() {
+function savingsFields() {
+  const active = savingsCategories.filter(cat => !cat.archived).map(cat => ({
+    ...cat,
+    icon: cat.id === 'gotówka' ? '💵' : '🏦',
+    color: cat.id === 'gotówka' ? '#f57c00' : '#388e3c'
+  }));
+  return active.concat(investCategories.map(name => ({ id: name, name, icon: '📈', color: '#1565c0' })));
+}
+
+function renderSavings(data) {
+  savingsCategoriesEditable = Array.isArray(data.savingsCategories);
+  savingsCategories = savingsCategoriesEditable ? data.savingsCategories : DEFAULT_SAVINGS_CATEGORIES;
+  const savingsIds = new Set(savingsCategories.map(cat => cat.id));
+  investCategories = (Array.isArray(data.categories) ? data.categories : ['USDC/Binance'])
+    .filter(name => !savingsIds.has(name));
+  savingsTotals = Object.assign(Object.create(null), data.totals);
+  const fields = savingsFields();
+  const archived = savingsCategories.filter(cat => cat.archived && Number(savingsTotals[cat.id]));
+  const displayed = fields.concat(archived);
+  const rows = displayed.map(cat => `
+    <div class="stat-row">
+      <span class="stat-lbl">${cat.icon || '🏦'} ${esc(cat.name)}${cat.archived ? ' · archiwum' : ''}</span>
+      <span class="stat-val">${fmt(savingsTotals[cat.id] || 0)}</span>
+    </div>`).join('');
+  const total = displayed.reduce((sum, cat) => sum + (Number(savingsTotals[cat.id]) || 0), 0);
+  document.getElementById('savings-content').innerHTML = rows + `
+    <div class="stat-total"><span class="lbl">RAZEM</span><span class="val">${fmt(total)}</span></div>`;
+  buildSavingsForms(fields);
+  renderSavingsCategoryList();
+  renderInvCatList();
+}
+
+function buildSavingsForms(fields) {
   const today = new Date().toISOString().split('T')[0];
-
-  // ── FORMULARZ "DODAJ DELTA" ──
-  let df = `
-    <div class="fg">
-      <label class="flabel">Data</label>
-      <input type="date" id="sv-date" class="finput" value="${today}">
-    </div>
-    <div class="fg">
-      <label class="flabel">🏦 Konto oszczędnościowe (+/− kwota)</label>
-      <input type="number" id="sv-konto" class="finput"
-             placeholder="np. 500 lub -200" step="0.01" inputmode="decimal"
-             style="font-size:20px;font-weight:800;color:#388e3c">
-    </div>
-    <div class="fg">
-      <label class="flabel">Opis konta (opcjonalnie)</label>
-      <input type="text" id="sv-konto-detail" class="finput" placeholder="np. przelew na konto">
-    </div>
-    <div class="fg">
-      <label class="flabel">💵 Gotówka (+/− kwota)</label>
-      <input type="number" id="sv-gotowka" class="finput"
-             placeholder="np. 200 lub -50" step="0.01" inputmode="decimal"
-             style="font-size:20px;font-weight:800;color:#f57c00">
-    </div>
-    <div class="fg">
-      <label class="flabel">Opis gotówki (opcjonalnie)</label>
-      <input type="text" id="sv-gotowka-detail" class="finput" placeholder="np. wypłata z banku">
-    </div>`;
-
-  _investCats.forEach(cat => {
-    const id = catId(cat);
-    df += `
-    <div class="fg">
-      <label class="flabel">📈 ${esc(cat)} (+/− kwota)</label>
-      <input type="number" id="sv-inv-${id}" class="finput"
-             placeholder="np. 1000 lub -300" step="0.01" inputmode="decimal"
-             style="font-size:20px;font-weight:800;color:#1565c0">
-    </div>
-    <div class="fg">
-      <label class="flabel">Opis (opcjonalnie)</label>
-      <input type="text" id="sv-inv-${id}-det" class="finput" placeholder="np. zakup ${esc(cat)}">
-    </div>`;
-  });
-
-  df += `
-    <div style="display:flex;gap:8px;margin-top:4px">
-      <button class="btn-sm btn-sm-primary" onclick="saveSavingsForm()">Zapisz</button>
-      <button class="btn-sm btn-sm-ghost"   onclick="toggleSavingsForm()">Anuluj</button>
-    </div>
-    <p style="font-size:11px;color:var(--muted);margin-top:8px">
-      Wpisz wartość ujemną (np. −500) aby odjąć od salda.
-    </p>`;
-
-  document.getElementById('savings-form').innerHTML = df;
-
-  // ── FORMULARZ "EDYTUJ AKTUALNY STAN" ──
-  let ef = `
-    <p style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5">
-      Wpisz <strong>aktualny stan</strong> — aplikacja wyliczy różnicę i dopisze korektę do historii.
-    </p>
-    <div class="fg">
-      <label class="flabel">Data korekty</label>
-      <input type="date" id="sv-edit-date" class="finput" value="${today}">
-    </div>
-    <div class="fg">
-      <label class="flabel">🏦 Aktualny stan konta oszczędnościowego</label>
-      <input type="number" id="sv-edit-konto" class="finput"
-             placeholder="0" step="0.01" inputmode="decimal"
-             style="font-size:22px;font-weight:800;color:#388e3c">
-    </div>
-    <div class="fg">
-      <label class="flabel">💵 Aktualny stan gotówki</label>
-      <input type="number" id="sv-edit-gotowka" class="finput"
-             placeholder="0" step="0.01" inputmode="decimal"
-             style="font-size:22px;font-weight:800;color:#f57c00">
-    </div>`;
-
-  _investCats.forEach(cat => {
-    const id = catId(cat);
-    ef += `
-    <div class="fg">
-      <label class="flabel">📈 Aktualny stan: ${esc(cat)}</label>
-      <input type="number" id="sv-edit-inv-${id}" class="finput"
-             placeholder="0" step="0.01" inputmode="decimal"
-             style="font-size:22px;font-weight:800;color:#1565c0">
-    </div>`;
-  });
-
-  ef += `
-    <div style="display:flex;gap:8px;margin-top:4px">
-      <button class="btn-sm btn-sm-primary" onclick="saveSavingsEdit()">Zapisz stan</button>
-      <button class="btn-sm btn-sm-ghost"   onclick="toggleSavingsEdit()">Anuluj</button>
-    </div>`;
-
-  document.getElementById('savings-edit-form').innerHTML = ef;
+  for (const mode of ['add', 'edit']) {
+    const edit = mode === 'edit';
+    const id = `sv-${mode}`;
+    const dateLabel = edit ? 'Data korekty' : 'Data';
+    const inputs = fields.map((cat, i) => `
+      <div class="fg">
+        <label class="flabel" for="${id}-${i}">${cat.icon} ${esc(cat.name)}${edit ? '' : ' (+/− kwota)'}</label>
+        <input type="number" id="${id}-${i}" class="finput" step="0.01" inputmode="decimal"
+               placeholder="${edit ? '0' : 'np. 500 lub -200'}" style="font-size:20px;font-weight:800;color:${cat.color}">
+      </div>${edit ? '' : `
+      <div class="fg">
+        <label class="flabel" for="${id}-${i}-detail">Opis (opcjonalnie)</label>
+        <input type="text" id="${id}-${i}-detail" class="finput">
+      </div>`}`).join('');
+    const form = document.getElementById(edit ? 'savings-edit-form' : 'savings-form');
+    form.innerHTML = `
+      ${edit ? '<p style="font-size:12px;color:var(--muted);margin-bottom:14px">Wpisz aktualny stan. Aplikacja dopisze różnicę do historii.</p>' : ''}
+      <div class="fg">
+        <label class="flabel" for="${id}-date">${dateLabel}</label>
+        <input type="date" id="${id}-date" class="finput" value="${today}">
+      </div>
+      ${inputs}
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button class="btn-sm btn-sm-primary" onclick="saveSavingsEntries('${mode}')">${edit ? 'Zapisz stan' : 'Zapisz'}</button>
+        <button class="btn-sm btn-sm-ghost" onclick="toggleSavingsPanel('${form.id}')">Anuluj</button>
+      </div>
+      ${edit ? '' : '<p style="font-size:11px;color:var(--muted);margin-top:8px">Wpisz kwotę ujemną, aby odjąć ją od salda.</p>'}`;
+  }
 }
 
-/* ── Toggle formularzy oszczędności ── */
+function toggleSavingsPanel(panelId) {
+  const opening = !document.getElementById(panelId).classList.contains('open');
+  if (opening && (!savingsReady || savingsBusy)) return false;
+  for (const id of ['savings-form', 'savings-edit-form', 'cat-manager']) {
+    document.getElementById(id).classList.toggle('open', opening && id === panelId);
+  }
+  return opening;
+}
+
 function toggleSavingsForm() {
-  const form = document.getElementById('savings-form');
-  const edit = document.getElementById('savings-edit-form');
-  const cm   = document.getElementById('cat-manager');
-  const isOpen = form.classList.contains('open');
-  edit.classList.remove('open');
-  cm.classList.remove('open');
-  if (isOpen) { form.classList.remove('open'); return; }
-  form.classList.add('open');
+  toggleSavingsPanel('savings-form');
 }
 
 function toggleSavingsEdit() {
-  const edit = document.getElementById('savings-edit-form');
-  const form = document.getElementById('savings-form');
-  const cm   = document.getElementById('cat-manager');
-  const isOpen = edit.classList.contains('open');
-  form.classList.remove('open');
-  cm.classList.remove('open');
-  if (isOpen) { edit.classList.remove('open'); return; }
-
-  // Wypełnij aktualne wartości
-  const kEl = document.getElementById('sv-edit-konto');
-  const gEl = document.getElementById('sv-edit-gotowka');
-  if (kEl) kEl.value = _savTotals['konto']   || '';
-  if (gEl) gEl.value = _savTotals['gotówka'] || '';
-  _investCats.forEach(cat => {
-    const el = document.getElementById(`sv-edit-inv-${catId(cat)}`);
-    if (el) el.value = _savTotals[cat] || '';
+  if (!toggleSavingsPanel('savings-edit-form')) return;
+  savingsFields().forEach((cat, i) => {
+    document.getElementById(`sv-edit-${i}`).value = Number(savingsTotals[cat.id]) || 0;
   });
-  edit.classList.add('open');
 }
 
-/* ── Zapisz delta ── */
-function saveSavingsForm() {
-  const date = document.getElementById('sv-date').value;
+function saveSavingsEntries(mode) {
+  if (!savingsReady || savingsBusy) return;
+  const date = document.getElementById(`sv-${mode}-date`).value;
   if (!date) return toast('Wybierz datę', 'err');
-
+  const edit = mode === 'edit';
   const entries = [];
-
-  const kAmt = parseFloat(document.getElementById('sv-konto').value) || 0;
-  const kDet = (document.getElementById('sv-konto-detail').value || '').trim();
-  if (kAmt !== 0) entries.push({ type: 'konto', amount: kAmt, detail: kDet });
-
-  const gAmt = parseFloat(document.getElementById('sv-gotowka').value) || 0;
-  const gDet = (document.getElementById('sv-gotowka-detail').value || '').trim();
-  if (gAmt !== 0) entries.push({ type: 'gotówka', amount: gAmt, detail: gDet });
-
-  _investCats.forEach(cat => {
-    const id  = catId(cat);
-    const amt = parseFloat(document.getElementById(`sv-inv-${id}`)?.value) || 0;
-    const det = (document.getElementById(`sv-inv-${id}-det`)?.value || '').trim();
-    if (amt !== 0) entries.push({ type: cat, amount: amt, detail: det });
+  savingsFields().forEach((cat, i) => {
+    const value = document.getElementById(`sv-${mode}-${i}`).value;
+    if (value === '') return;
+    const amount = edit ? round2(Number(value) - (Number(savingsTotals[cat.id]) || 0)) : Number(value);
+    const detail = edit ? 'korekta stanu' : document.getElementById(`sv-add-${i}-detail`).value.trim();
+    if (amount !== 0) entries.push({ type: cat.id, amount, detail });
   });
-
-  if (!entries.length) return toast('Wpisz przynajmniej jedną kwotę', 'err');
-
-  run('addSavings', [date, entries], res => {
-    if (res.success) {
-      toast('✓ Oszczędności zapisane!', 'ok');
-      document.getElementById('savings-form').classList.remove('open');
-      loadMore();
-    } else {
-      toast('Błąd: ' + res.error, 'err');
-    }
-  }, err => toast('Błąd: ' + (err.message || err), 'err'));
+  if (!entries.length) {
+    return toast(edit ? 'Wartości bez zmian' : 'Wpisz przynajmniej jedną kwotę', edit ? 'ok' : 'err');
+  }
+  saveSavingsChange('addSavings', [date, entries], edit ? 'Stan zaktualizowany' : 'Oszczędności zapisane', () => {
+    document.getElementById(edit ? 'savings-edit-form' : 'savings-form').classList.remove('open');
+  });
 }
 
-/* ── Zapisz aktualny stan (korekta delta) ── */
-function saveSavingsEdit() {
-  const date = document.getElementById('sv-edit-date').value;
-  if (!date) return toast('Wybierz datę', 'err');
-
-  const entries = [];
-
-  const newKonto   = parseFloat(document.getElementById('sv-edit-konto').value)   || 0;
-  const newGotowka = parseFloat(document.getElementById('sv-edit-gotowka').value) || 0;
-  const dK = round2(newKonto   - (_savTotals['konto']   || 0));
-  const dG = round2(newGotowka - (_savTotals['gotówka'] || 0));
-  if (dK !== 0) entries.push({ type: 'konto',   amount: dK, detail: 'korekta stanu' });
-  if (dG !== 0) entries.push({ type: 'gotówka', amount: dG, detail: 'korekta stanu' });
-
-  _investCats.forEach(cat => {
-    const id  = catId(cat);
-    const el  = document.getElementById(`sv-edit-inv-${id}`);
-    const nv  = parseFloat(el?.value) || 0;
-    const dv  = round2(nv - (_savTotals[cat] || 0));
-    if (dv !== 0) entries.push({ type: cat, amount: dv, detail: 'korekta stanu' });
-  });
-
-  if (!entries.length) return toast('Wartości bez zmian — nic nie zapisano', 'ok');
-
-  run('addSavings', [date, entries], res => {
-    if (res.success) {
-      const info = entries.map(e => `${e.type}: ${e.amount > 0 ? '+' : ''}${e.amount}`).join(', ');
-      toast('✓ Stan zaktualizowany (' + info + ')', 'ok');
-      document.getElementById('savings-edit-form').classList.remove('open');
-      loadMore();
-    } else {
-      toast('Błąd: ' + res.error, 'err');
-    }
-  }, err => toast('Błąd: ' + (err.message || err), 'err'));
+function saveSavingsChange(method, args, message, onSaved) {
+  if (!savingsReady || savingsBusy) return;
+  savingsBusy = true;
+  syncSavingsControls();
+  const failed = error => {
+    savingsBusy = false;
+    syncSavingsControls();
+    toast('Błąd zapisu: ' + (error?.message || error || 'spróbuj ponownie'), 'err');
+  };
+  run(method, args, result => {
+    if (!result?.success) return failed(result?.error);
+    savingsBusy = false;
+    onSaved?.();
+    toast('✓ ' + message, 'ok');
+    loadSavings();
+  }, failed);
 }
 
-/* ════════════════════════════════════════════════
-   MENADŻER KATEGORII INWESTYCJI
-════════════════════════════════════════════════ */
 function toggleCatManager() {
-  const cm   = document.getElementById('cat-manager');
-  const form = document.getElementById('savings-form');
-  const edit = document.getElementById('savings-edit-form');
-  const isOpen = cm.classList.contains('open');
-  form.classList.remove('open');
-  edit.classList.remove('open');
-  if (isOpen) { cm.classList.remove('open'); return; }
-  renderInvCatList();
-  cm.classList.add('open');
+  toggleSavingsPanel('cat-manager');
+}
+
+function renderSavingsCategoryList() {
+  document.getElementById('savings-category-manager').hidden = !savingsCategoriesEditable;
+  document.getElementById('savings-category-list').innerHTML = savingsCategories.map((cat, i) => `
+    <div class="inv-cat-row">
+      <span class="inv-cat-name">${esc(cat.name)}${cat.archived ? ' · archiwum' : ''}</span>
+      <div class="savings-category-actions">
+        ${cat.archived
+          ? `<button class="btn-sm btn-sm-ghost" onclick="restoreSavingsCategory(${i})">Przywróć</button>`
+          : `<button class="btn-sm btn-sm-ghost" onclick="renameSavingsCategory(${i})">Zmień nazwę</button>
+             <button class="btn-sm btn-sm-danger" onclick="archiveSavingsCategory(${i})">Usuń</button>`}
+      </div>
+    </div>`).join('');
+}
+
+function addSavingsCategory() {
+  const input = document.getElementById('new-savings-category');
+  const name = input.value.trim();
+  if (!name) return toast('Wpisz nazwę kategorii', 'err');
+  saveSavingsChange('updateSavingsCategory', ['add', null, name], 'Dodano kategorię', () => { input.value = ''; });
+}
+
+function renameSavingsCategory(index) {
+  const cat = savingsCategories[index];
+  if (!cat) return;
+  const name = prompt('Nowa nazwa kategorii oszczędności', cat.name)?.trim();
+  if (name === undefined || name === cat.name) return;
+  if (!name || name.length > 60) return toast('Wpisz nazwę od 1 do 60 znaków', 'err');
+  saveSavingsChange('updateSavingsCategory', ['rename', cat.id, name], 'Zmieniono nazwę kategorii');
+}
+
+function archiveSavingsCategory(index) {
+  const cat = savingsCategories[index];
+  if (!cat || !confirm(`Usunąć kategorię „${cat.name}”? Kategoria trafi do archiwum. Jej saldo nadal będzie wliczane do sumy.`)) return;
+  saveSavingsChange('updateSavingsCategory', ['archive', cat.id, null], 'Przeniesiono kategorię do archiwum');
+}
+
+function restoreSavingsCategory(index) {
+  const cat = savingsCategories[index];
+  if (cat) saveSavingsChange('updateSavingsCategory', ['restore', cat.id, null], 'Przywrócono kategorię');
 }
 
 function renderInvCatList() {
   const el = document.getElementById('inv-cat-list');
-  if (!_investCats.length) {
-    el.innerHTML = '<p style="font-size:13px;color:var(--muted);padding:8px 0">Brak kategorii — dodaj pierwszą poniżej.</p>';
-    return;
-  }
-  el.innerHTML = _investCats.map((cat, i) => `
+  el.innerHTML = investCategories.map((name, i) => `
     <div class="inv-cat-row">
-      <span class="inv-cat-name">📈 ${esc(cat)}</span>
-      <button class="btn-sm btn-sm-danger" style="font-size:11px;padding:6px 10px"
-              onclick="removeInvestCat(${i})">Usuń</button>
-    </div>`).join('');
+      <span class="inv-cat-name">📈 ${esc(name)}</span>
+      <button class="btn-sm btn-sm-danger" onclick="removeInvestCat(${i})">Usuń</button>
+    </div>`).join('') || '<p style="font-size:13px;color:var(--muted);padding:8px 0">Brak kategorii</p>';
 }
 
 function addInvestCat() {
   const input = document.getElementById('new-cat-input');
-  const name  = (input.value || '').trim();
+  const name = input.value.trim();
   if (!name) return toast('Wpisz nazwę kategorii', 'err');
-  if (_investCats.includes(name)) return toast('Taka kategoria już istnieje', 'err');
-
-  _investCats.push(name);
-  run('saveInvestCategories', [_investCats], res => {
-    if (res.success) {
-      _savTotals[name] = 0;
-      input.value = '';
-      toast('✓ Dodano: ' + name, 'ok');
-      renderInvCatList();
-      buildSavingsForms();
-      // Przebuduj też wyświetlany stan (dodaj wiersz)
-      const sv = document.getElementById('savings-content');
-      if (sv) {
-        const existing = sv.innerHTML.replace(/<div class="stat-total"[\s\S]*/, '');
-        const totalAll = Object.values(_savTotals).reduce((s, v) => s + v, 0);
-        sv.innerHTML = existing +
-          `<div class="stat-row"><span class="stat-lbl">📈 ${esc(name)}</span><span class="stat-val">${fmt(0)}</span></div>` +
-          `<div class="stat-total"><span class="lbl">RAZEM</span><span class="val">${fmt(totalAll)}</span></div>`;
-      }
-    } else {
-      _investCats.pop();
-      toast('Błąd zapisu: ' + res.error, 'err');
-    }
-  }, () => { _investCats.pop(); toast('Błąd zapisu', 'err'); });
+  if (investCategories.includes(name) || savingsCategories.some(cat => cat.id === name)) {
+    return toast('Taka kategoria już istnieje', 'err');
+  }
+  saveSavingsChange('saveInvestCategories', [[...investCategories, name]], 'Dodano kategorię inwestycji', () => { input.value = ''; });
 }
 
-function removeInvestCat(idx) {
-  const name = _investCats[idx];
-  if (!confirm(`Usunąć kategorię „${name}"?\n\nDane historyczne w arkuszu pozostaną bez zmian.`)) return;
-  _investCats.splice(idx, 1);
-  run('saveInvestCategories', [_investCats], res => {
-    if (res.success) {
-      toast('✓ Usunięto: ' + name, 'ok');
-      renderInvCatList();
-      loadMore(); // przeładuj cały panel
-    } else {
-      _investCats.splice(idx, 0, name);
-      toast('Błąd zapisu: ' + res.error, 'err');
-    }
-  }, () => { _investCats.splice(idx, 0, name); toast('Błąd zapisu', 'err'); });
+function removeInvestCat(index) {
+  const name = investCategories[index];
+  if (!name || !confirm(`Usunąć kategorię „${name}”? Historia tej kategorii zostanie w arkuszu.`)) return;
+  const categories = investCategories.filter((_, i) => i !== index);
+  saveSavingsChange('saveInvestCategories', [categories], 'Usunięto kategorię inwestycji');
 }
 
 /* ════════════════════════════════════════════════
