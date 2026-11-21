@@ -398,6 +398,8 @@ body{
 .imp-name{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .imp-title{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .imp-amt{font-size:15px;font-weight:800;color:var(--red);flex-shrink:0;white-space:nowrap}
+.imp-amt.income{color:#256329}
+.imp-dup .imp-amt.income{color:var(--muted)}
 .imp-row-bot{display:flex;gap:8px}
 .imp-select{
   flex:1;padding:9px 10px;border:2px solid var(--border);
@@ -754,7 +756,7 @@ body{
         Pobierz wyciąg z ING:<br>
         <strong>Moje finanse → Historia → Pobierz → CSV lub PDF</strong><br>
         Erste Bank: historia rachunku jako PDF.<br>
-        Importowane są tylko wydatki (kwoty ujemne).
+        Podgląd pokazuje wydatki i wpływy. Przed zapisaniem sprawdź, które wpływy są przychodami.
       </p>
       <div class="fg">
         <label class="flabel">Dla kogo?</label>
@@ -2299,70 +2301,68 @@ function parseIngCsv(text) {
       details: detailsCol !== -1 ? (c[detailsCol] || '').trim() : '',
       transactionId: txIdCol !== -1 ? String(c[txIdCol] || '').replace(/[^\d]/g, '') : '',
       amount,
-      balance
+      balance,
+      booked: isFinite(bookedAmount) && bookedAmount !== 0,
+      explicitCredit: /^\s*\+/.test(c[amtCol] || '')
     });
   }
 
   const rows = [];
   const unresolved = [];
+  const creditCounts = new Map();
+  const addRow = (r, income, needsReview = false) => {
+    let transactionId = r.transactionId;
+    if (income && !transactionId) {
+      const key = JSON.stringify([r.date, r.amount, r.balance, r.contractor.slice(0, 250), r.title.slice(0, 500)]);
+      const occurrence = (creditCounts.get(key) || 0) + 1;
+      creditCounts.set(key, occurrence);
+      transactionId = 'csv:' + occurrence + ':' + key;
+    }
+    rows.push({
+      date: r.date,
+      contractor: r.contractor,
+      title: r.title,
+      amount: Math.abs(r.amount),
+      transactionId,
+      kind: income ? 'income' : 'expense',
+      needsReview,
+      rawText: [r.contractor, r.title, r.details].filter(Boolean).join(' ')
+    });
+  };
   candidates.forEach((r, idx) => {
     if (!isFinite(r.amount) || r.amount === 0) return;
 
-    let isExpense = r.amount < 0;
-    if (!isExpense && isFinite(r.balance)) {
-      const older = candidates.slice(idx + 1).find(x => isFinite(x.balance));
-      if (older) {
-        const balanceChange = r.balance - older.balance;
-        isExpense = Math.abs(balanceChange + Math.abs(r.amount)) < 0.02;
-        // Niektóre stare eksporty ING gubią znak kwoty, a rozliczenie
-        // wcześniejszej blokady zaburza zmianę salda. Wtedy rozpoznajemy
-        // jednoznaczne typy wydatków po opisie.
-        if (!isExpense) {
-          const hint = `${r.contractor} ${r.title} ${r.details}`;
-          isExpense = /Płatność|Wypłata|Opłata|Bilet parkingowy|Darowizna|Składka|Przelew własny/i.test(hint)
-            && !/Zwrot|Świadczenie|Wynagrodzenie/i.test(hint);
-        }
-      } else {
-        const hint = `${r.contractor} ${r.title} ${r.details}`;
-        isExpense = /Płatność|Wypłata|Opłata|Bilet parkingowy|Darowizna|Składka|Przelew własny/i.test(hint)
-          && !/Zwrot|Świadczenie|Wynagrodzenie/i.test(hint);
-        if (!isExpense) {
-          unresolved.push(r);
-          return;
-        }
-      }
-    }
+    if (r.amount < 0) return addRow(r, false);
+    if (!r.booked) return;
+    if (r.explicitCredit) return addRow(r, true);
+    const older = isFinite(r.balance) && candidates.slice(idx + 1).find(x => isFinite(x.balance));
+    const change = older ? r.balance - older.balance : NaN;
+    if (Math.abs(change + r.amount) < 0.02) return addRow(r, false);
+    if (Math.abs(change - r.amount) < 0.02) return addRow(r, true);
 
-    if (isExpense) {
-      rows.push({
-        date: r.date,
-        contractor: r.contractor,
-        title: r.title,
-        amount: Math.abs(r.amount),
-        transactionId: r.transactionId,
-        rawText: [r.contractor, r.title, r.details].filter(Boolean).join(' ')
-      });
+    // Starsze eksporty gubią znak, a rozliczenie blokad zaburza zmianę salda.
+    const hint = `${r.contractor} ${r.title} ${r.details}`;
+    const creditHint = /Zwrot|Świadczenie|Wynagrodzenie|Przelew (?:przychodzący|otrzymany)|Uznanie rachunku/i.test(hint);
+    if (creditHint) return addRow(r, true);
+    if (isFinite(r.balance) && /Płatność|Wypłata|Opłata|Bilet parkingowy|Darowizna|Składka|Przelew własny/i.test(hint))
+      return addRow(r, false);
+    unresolved.push(r);
+  });
+
+  const debitTotal = rows.reduce((sum, r) => sum + (r.kind === 'expense' ? r.amount : 0), 0);
+  const remaining = expectedDebitTotal === null ? null : expectedDebitTotal - debitTotal;
+  const possibleLegacyDebits = unresolved.filter(r => isFinite(r.balance) && remaining !== null
+    && remaining > 0 && Math.abs(remaining - r.amount) < 0.02);
+  const balanceUncertain = remaining === null || Math.abs(remaining) >= 0.02 && possibleLegacyDebits.length !== 1;
+  unresolved.forEach(r => {
+    if (possibleLegacyDebits.length === 1 && r === possibleLegacyDebits[0]) {
+      addRow(r, false);
+    } else {
+      addRow(r, true, balanceUncertain && (remaining !== null || isFinite(r.balance)));
     }
   });
 
-  if (unresolved.length && expectedDebitTotal !== null) {
-    let remaining = expectedDebitTotal - rows.reduce((sum, r) => sum + r.amount, 0);
-    unresolved.forEach(r => {
-      if (Math.abs(remaining - Math.abs(r.amount)) < 0.02) {
-        rows.push({
-          date: r.date,
-          contractor: r.contractor,
-          title: r.title,
-          amount: Math.abs(r.amount),
-          transactionId: r.transactionId,
-          rawText: [r.contractor, r.title, r.details].filter(Boolean).join(' ')
-        });
-        remaining -= Math.abs(r.amount);
-      }
-    });
-  }
-
-  return rows.length ? { rows } : { error: 'Brak wydatków w pliku (kwoty ujemne).' };
+  return rows.length ? { rows } : { error: 'Nie znaleziono transakcji w pliku.' };
 }
 
 function decodeIngCsvBuffer(buf) {
@@ -2634,7 +2634,7 @@ async function parseIngPdf(file) {
   }
 
   const dateAnyRe = /(\d{4}-\d{2}-\d{2}|\d{2}[.\-]\d{2}[.\-]\d{4})/;
-  const negAmtRe  = /[-−–]\s*(\d[\d\s]*[,]\d{2})/g;
+  const amountRe  = /[+\-−–]?\s*\d[\d\s]*,\d{2}/g;
 
   function normDate(s) {
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
@@ -2703,13 +2703,12 @@ async function parseIngPdf(file) {
         .filter(item => item.x >= 400 && item.x < 510)
         .map(item => item.text)
         .join(' ');
-      negAmtRe.lastIndex = 0;
-      let m;
-      while ((m = negAmtRe.exec(amountColumn)) !== null) lastAmt = m[1];
+      const amounts = amountColumn.match(amountRe);
+      if (amounts) lastAmt = amounts.at(-1);
     });
     if (!lastAmt) continue;
 
-    const amount = parseFloat(lastAmt.replace(/\s/g, '').replace(',', '.'));
+    const amount = receiptMoney(lastAmt.trim().replace(/^\+/, ''));
     if (isNaN(amount) || amount === 0) continue;
 
     let dateStr = '';
@@ -2736,24 +2735,32 @@ async function parseIngPdf(file) {
 
     rows.push({
       date:       dateStr,
-      contractor: contractor || 'Nieznany odbiorca',
+      contractor: contractor || (amount > 0 ? 'Nieznany nadawca' : 'Nieznany odbiorca'),
       title: title || contractor,
       isTransfer: /Przelew własny/i.test(title),
-      amount,
+      amount: Math.abs(amount),
+      kind: amount > 0 ? 'income' : 'expense',
       transactionId: idMatch[1],
       rawText:    allText
     });
   }
 
-  const summaryRow = sortedRows.find(row => /Suma obci/i.test(row.text));
-  const expected = summaryRow?.text.match(/\((\d+)\)\s*:?\s*(\d[\d\s]*[,]\d{2})/);
-  if (expected && (rows.length !== Number(expected[1]) ||
-      rows.reduce((sum,row) => sum + Math.round(row.amount * 100), 0) !== Math.round(receiptMoney(expected[2]) * 100))) {
+  const totalsMatch = (label, kind) => {
+    const summaryRow = sortedRows.find(row => label.test(row.text));
+    if (!summaryRow) return true;
+    const expected = summaryRow.text.slice(summaryRow.text.search(label)).match(/\((\d+)\)\s*:?\s*([+\-−–]?\s*\d[\d\s]*,\d{2})/);
+    if (!expected) return true;
+    const group = rows.filter(row => row.kind === kind);
+    return group.length === Number(expected[1]) &&
+      group.reduce((sum, row) => sum + Math.round(row.amount * 100), 0) ===
+        Math.abs(Math.round(receiptMoney(expected[2].trim().replace(/^\+/, '')) * 100));
+  };
+  if (!totalsMatch(/Suma obci/i, 'expense') || !totalsMatch(/Suma uzna/i, 'income')) {
     return {error:'Odczyt PDF nie zgadza się z podsumowaniem banku. Pobierz historię jako CSV — import został zatrzymany, aby nie pominąć transakcji.'};
   }
   return rows.length
     ? { rows }
-    : { error: 'Nie znaleziono wydatków w PDF.\nUpewnij się, że to wyciąg ING (Moje finanse → Historia → Pobierz → PDF)\nalbo historia rachunku z Erste Banku.' };
+    : { error: 'Nie znaleziono transakcji w PDF.\nUpewnij się, że to wyciąg ING (Moje finanse → Historia → Pobierz → PDF)\nalbo historia rachunku z Erste Banku.' };
 }
 
 // „Historia rachunku” z Erste Banku: każda operacja zaczyna się wierszem „Data operacji”,
@@ -2781,8 +2788,8 @@ function parseErsteRows(sortedRows) {
     const head = op[0];
     const amountText = col(head, 380, 480);
     const balanceText = col(head, 480, 1000);
-    if (!/^[-−–]/.test(amountText)) continue; // tylko wydatki
-    const cents = Math.abs(money(amountText));
+    const signed = money(amountText);
+    const cents = Math.abs(signed);
     const balance = money(balanceText);
     if (!cents || isNaN(balance)) continue;
 
@@ -2792,23 +2799,27 @@ function parseErsteRows(sortedRows) {
     const lines = op.map(r => col(r, 140, 380)).filter(Boolean);
     const toIdx = lines.findIndex(l => /^Na rachunek:/i.test(l));
     const titleIdx = lines.findIndex(l => /^Tytuł:/i.test(l));
-    const contractor = toIdx >= 0
-      ? lines.slice(toIdx + 1, titleIdx > toIdx ? titleIdx : undefined).join('\n')
+    const fromIdx = lines.findIndex(l => /^Z rachunku:/i.test(l));
+    const partyIdx = signed > 0 ? fromIdx : toIdx;
+    const otherIdx = signed > 0 ? toIdx : fromIdx;
+    const stop = Math.min(...[titleIdx, otherIdx, lines.length].filter(i => i > partyIdx));
+    const contractor = partyIdx >= 0
+      ? lines.slice(partyIdx + 1, stop).join('\n')
           .replace(/\s+(?:ul\.|al\.)\s.*$/gim, '').trim() : ''; // adres sprzedawcy to szum
     const title = titleIdx >= 0
       ? [lines[titleIdx].replace(/^Tytuł:\s*/i, '')].concat(lines.slice(titleIdx + 1)).join(' ').trim() : '';
-    const fromIdx = lines.findIndex(l => /^Z rachunku:/i.test(l));
-    const owner = fromIdx >= 0 ? (lines[fromIdx + 1] || '') : '';
+    const owner = otherIdx >= 0 ? (lines[otherIdx + 1] || '') : '';
     const norm = s => s.toUpperCase().replace(/\s+/g, ' ').trim();
     const isOwn = !!contractor && owner && norm(owner).startsWith(norm(contractor.split('\n')[0]));
 
     rows.push({
       date: dateM[0],
-      contractor: isOwn ? 'Przelew własny' : (contractor || 'Nieznany odbiorca'),
+      contractor: isOwn ? 'Przelew własny' : (contractor || (signed > 0 ? 'Nieznany nadawca' : 'Nieznany odbiorca')),
       title: title || contractor,
       isTransfer: isOwn,
       amount: cents / 100,
-      transactionId: '9' + dateM[0].replace(/-/g, '') + String(cents) + (balance < 0 ? '1' : '0') + String(Math.abs(balance)),
+      kind: signed > 0 ? 'income' : 'expense',
+      transactionId: (signed > 0 ? 'erste:' : '') + '9' + dateM[0].replace(/-/g, '') + String(cents) + (balance < 0 ? '1' : '0') + String(Math.abs(balance)),
       erste: true,
       rawText: op.map(r => r.text).join(' ')
     });
@@ -2817,11 +2828,12 @@ function parseErsteRows(sortedRows) {
   const summary = sortedRows.find(r => /Suma wydatków/i.test(r.text));
   const countM = summary?.text.match(/Liczba operacji:\s*(\d+)/i);
   const sumM = summary?.text.match(/Suma wydatków:\s*([-−–]?\s*[\d\s ]+,\d{2})/i);
-  if (countM && sumM && (rows.length !== Number(countM[1]) ||
-      rows.reduce((s, r) => s + Math.round(r.amount * 100), 0) !== Math.abs(money(sumM[1])))) {
+  const debits = rows.filter(r => r.kind === 'expense');
+  if (countM && sumM && (debits.length !== Number(countM[1]) ||
+      debits.reduce((s, r) => s + Math.round(r.amount * 100), 0) !== Math.abs(money(sumM[1])))) {
     return {error:'Odczyt PDF Erste nie zgadza się z podsumowaniem banku — import zatrzymany, aby nie pominąć transakcji.'};
   }
-  return rows.length ? { rows } : { error: 'Nie znaleziono wydatków w PDF z Erste Banku.' };
+  return rows.length ? { rows } : { error: 'Nie znaleziono transakcji w PDF z Erste Banku.' };
 }
 
 // Krótkie „Zestawienie operacji” z aplikacji Erste (bez podsumowania): wiersz = data słownie
@@ -2831,7 +2843,7 @@ function parseErsteRows(sortedRows) {
 function parseErsteListRows(sortedRows) {
   const MONTHS = { sty: 1, lut: 2, mar: 3, kwi: 4, maj: 5, cze: 6, lip: 7, sie: 8, wrz: 9, 'paź': 10, lis: 11, gru: 12 };
   const money = s => Math.round(parseFloat(String(s).replace(/PLN/i, '').replace(/[\s ]/g, '').replace(/[−–]/g, '-').replace(',', '.')) * 100);
-  const moneyRe = /^[-−–]?\d[\d\s ]*,\d{2} PLN$/;
+  const moneyRe = /^[+\-−–]?\s*\d[\d\s ]*,\d{2} PLN$/;
   // PDF rozbija słowa na polskich literach (pa|ź, WIERZBI|Ę|CICE) — sklejamy elementy bez odstępu.
   const glue = items => items.reduce((s, it, k) => {
     const prev = items[k - 1];
@@ -2865,22 +2877,23 @@ function parseErsteListRows(sortedRows) {
       return { error: 'Odczyt PDF Erste: salda się nie zgadzają (' + ops[i].date + ') — import zatrzymany, aby nie pominąć transakcji.' };
   }
 
-  const rows = ops.filter(op => op.amount < 0).map(op => {
+  const rows = ops.filter(op => op.amount !== 0).map(op => {
     const cents = Math.abs(op.amount);
     const contractor = op.lines.join('\n').replace(/\s+(?:ul\.|al\.)\s.*$/gim, '').trim(); // adres sprzedawcy to szum
     const isOwn = /^(WOJCIECH|SYLWIA) KACZMARCZYK$/i.test(contractor.replace(/\s+/g, ' '));
     return {
       date: op.date,
-      contractor: isOwn ? 'Przelew własny' : (contractor || 'Nieznany odbiorca'),
+      contractor: isOwn ? 'Przelew własny' : (contractor || (op.amount > 0 ? 'Nieznany nadawca' : 'Nieznany odbiorca')),
       title: contractor,
       isTransfer: isOwn,
       amount: cents / 100,
-      transactionId: '9' + op.date.replace(/-/g, '') + String(cents) + (op.balance < 0 ? '1' : '0') + String(Math.abs(op.balance)),
+      kind: op.amount > 0 ? 'income' : 'expense',
+      transactionId: (op.amount > 0 ? 'erste:' : '') + '9' + op.date.replace(/-/g, '') + String(cents) + (op.balance < 0 ? '1' : '0') + String(Math.abs(op.balance)),
       erste: true,
       rawText: op.rawText
     };
   });
-  return rows.length ? { rows } : { error: 'Nie znaleziono wydatków w PDF z Erste Banku.' };
+  return rows.length ? { rows } : { error: 'Nie znaleziono transakcji w PDF z Erste Banku.' };
 }
 
 // Paragon ma krótką nazwę („BIEDRONKA”), a reguła importu potrafi podstawić pełnego kontrahenta
@@ -2891,10 +2904,24 @@ function receiptShopMatches(receiptShop, row) {
   return [row.shop, row.contractor].some(s => s && key(s) === target);
 }
 
+function incomeImportReview(row, existing) {
+  const party = row.contractor.trim().split('\n')[0];
+  const description = [party, row.title, row.rawText].join(' ');
+  if (row.isTransfer || /przelew własny|przelew (?:między|pomiędzy) (?:własnymi )?rachunkami/i.test(description)
+      || /^(?:WOJCIECH|SYLWIA) KACZMARCZYK(?:$|\s)/i.test(party))
+    return 'przelew własny — odznaczony';
+  if (/\bzwrot\b|korekta (?:płatności|transakcji)|wypłata (?:kredytu|pożyczki)|uruchomienie (?:kredytu|pożyczki)/i.test(description))
+    return 'sprawdź, czy to przychód';
+  if (existing.some(item => item.date === row.date && Math.round(item.amount * 100) === Math.round(row.amount * 100)
+      && (!item.transactionId || item.transactionId.startsWith('csv:') || row.transactionId?.startsWith('csv:'))))
+    return 'podobny przychód już zapisany';
+  return row.needsReview ? 'sprawdź znak kwoty na wyciągu' : '';
+}
+
 function _finishAnalyze(rawRows) {
   const sheet = _impPerson === 'Sylwia' ? 'Sylwia' : 'Wojtek';
 
-  run('getExpenseFingerprints', [sheet], fingerprints => {
+  run('getImportFingerprints', [sheet], ({ expenses: fingerprints, income }) => {
     const baseKey = row => `${row.date}|${Number(row.amount).toFixed(2)}`;
     const existingBaseCounts = {};
     const existingIds = new Set();
@@ -2909,9 +2936,21 @@ function _finishAnalyze(rawRows) {
       if (fp.transactionId) existingIds.add(String(fp.transactionId));
     });
 
-    let applied = 0;
+    const incomeIds = new Set(income.map(item => item.transactionId).filter(Boolean));
+    const ersteDay = id => Date.parse(`${id.slice(1, 5)}-${id.slice(5, 7)}-${id.slice(7, 9)}`);
+    const isErsteId = id => /^9\d{8}/.test(id) && !isNaN(ersteDay(id));
+    const sameErstePayment = (left, right) => left.slice(9) === right.slice(9) &&
+      Math.abs(ersteDay(left) - ersteDay(right)) <= 7 * 864e5;
+    const ersteIncomeIds = [...incomeIds].filter(id => id.startsWith('erste:')).map(id => id.slice(6));
 
     _impRows = rawRows.map(r => {
+      if (r.kind === 'income') {
+        const id = r.transactionId;
+        const ersteId = r.erste ? id.slice(6) : '';
+        const isDuplicate = incomeIds.has(id) ||
+          (isErsteId(ersteId) && ersteIncomeIds.some(known => sameErstePayment(known, ersteId)));
+        return { ...r, isDuplicate, review: incomeImportReview(r, income) };
+      }
       const ruleKey = findRuleKey(r.contractor);
       const cleanShop = cleanContractor(r.contractor, r.title || '');
       // Przelew własny zostaje odznaczony, ale ma gotową kategorię, gdyby ktoś go zaznaczył.
@@ -2924,25 +2963,24 @@ function _finishAnalyze(rawRows) {
     // Najpierw dopasuj trwały identyfikator ING zapisany w notatce komórki.
     _impRows.forEach(r => {
       const id = String(r.transactionId || '');
-      if (!id || !existingIds.has(id)) return;
+      if (r.kind === 'income' || !id || !existingIds.has(id)) return;
       r.isDuplicate = true;
     });
 
     // Erste: „Historia rachunku” daje datę operacji, krótkie zestawienie — księgowania, więc ID
     // (9 + RRRRMMDD + kwota + saldo) może różnić się samą datą. Ta sama reszta i data ±7 dni = dubel.
-    const ersteDay = id => Date.parse(`${id.slice(1, 5)}-${id.slice(5, 7)}-${id.slice(7, 9)}`);
-    const ersteIds = [...existingIds].filter(id => /^9\d{8}/.test(id) && !isNaN(ersteDay(id)));
+    const ersteIds = [...existingIds].filter(isErsteId);
     _impRows.forEach(r => {
       const id = String(r.transactionId || '');
-      if (r.isDuplicate || !r.erste || !/^9\d{8}/.test(id)) return;
-      if (ersteIds.some(e => e.slice(9) === id.slice(9) && Math.abs(ersteDay(e) - ersteDay(id)) <= 7 * 864e5))
+      if (r.kind === 'income' || r.isDuplicate || !r.erste || !isErsteId(id)) return;
+      if (ersteIds.some(e => sameErstePayment(e, id)))
         r.isDuplicate = true;
     });
 
     // Starsze wpisy nie mają ID. Dla nich porównujemy liczność data+kwota,
     // zamiast usuwać wszystkie identyczne kwoty z danego dnia.
     _impRows.forEach(r => {
-      if (r.isDuplicate) return;
+      if (r.kind === 'income' || r.isDuplicate) return;
       const matches = fingerprints.filter(fp => fp.hasReceipt && !fp.transactionId &&
         Math.round(fp.amount * 100) === Math.round(r.amount * 100) &&
         Math.abs(new Date(fp.date) - new Date(r.date)) <= 3 * 86400000 &&
@@ -2956,45 +2994,24 @@ function _finishAnalyze(rawRows) {
       }
     });
 
-    const alreadyImported = _impRows.filter(r => r.isDuplicate).length;
-    _impRows.forEach(r => {
-      if (r.ruleKey && !r.isDuplicate) applied++;
-    });
-
-    _showImportStep2(applied, alreadyImported);
+    _showImportStep2(_impRows.filter(r => r.ruleKey && !r.isDuplicate).length);
   }, () => {
     toast('Nie udało się sprawdzić duplikatów. Spróbuj ponownie przed importem.', 'err');
   });
 }
 
-function _showImportStep2(applied, alreadyImported) {
-  const newRows = _impRows.filter(r => !r.isDuplicate);
-  const total = newRows.reduce((s, r) => s + r.amount, 0);
-
+function _showImportStep2(applied) {
   document.getElementById('imp-missing-msg').hidden = true;
   document.getElementById('import-step1').style.display = 'none';
   document.getElementById('import-step2').style.display = 'block';
 
-  let summaryText = newRows.length
-    ? `${newRows.length} nowych wydatków • łącznie ${fmt(total)}`
-    : 'Wszystkie transakcje już wpisane';
-  if (alreadyImported)
-    summaryText += ` • ${alreadyImported} już wpisanych (zaznaczone szarym)`;
-  document.getElementById('imp-summary').textContent = summaryText;
-
   document.getElementById('imp-rules-applied').textContent =
-    applied ? `✓ Zastosowano ${applied} reguł automatycznie` : 'Brak zapisanych reguł — skategoryzuj ręcznie';
+    applied ? `✓ Zastosowano ${applied} reguł wydatków` : '';
 
   const btn = document.getElementById('btn-confirm-import');
-  if (!_impRows.length) {
-    document.getElementById('import-table').innerHTML =
-      '<div class="empty"><div class="empty-ico">✅</div>Wszystkie transakcje z wyciągu są już wpisane w arkuszu!</div>';
-    btn.style.display = 'none';
-  } else {
-    btn.style.display = '';
-    _renderImportTable();
-    updateImportSelected();
-  }
+  btn.style.display = _impRows.some(r => !r.isDuplicate) ? '' : 'none';
+  _renderImportTable();
+  updateImportSelected();
 }
 
 function impCatOptions() {
@@ -3005,13 +3022,19 @@ function _renderImportTable() {
   const catOptions = impCatOptions();
 
   const html = _impRows.map((r, i) => {
-    const dupClass = r.isDuplicate ? 'imp-dup' : (r.category ? '' : 'imp-unknown');
-    const checked = r.isDuplicate || r.isTransfer || /Przelew własny/i.test(r.title || '') || r.ambiguousReceipt ? '' : 'checked';
+    const income = r.kind === 'income';
+    const dupClass = r.isDuplicate ? 'imp-dup' : (income || r.category ? '' : 'imp-unknown');
+    const checked = r.isDuplicate || r.review || r.isTransfer || /Przelew własny/i.test(r.title || '') || r.ambiguousReceipt ? '' : 'checked';
     const badge = r.isDuplicate ? '<span class="imp-dup-badge">już wpisana</span>' :
+      r.review ? `<span class="imp-dup-badge">${esc(r.review)}</span>` :
       r.linkRow ? '<span class="imp-dup-badge">połącz z zapisanym paragonem</span>' :
       r.ambiguousReceipt ? '<span class="imp-dup-badge">kilka pasujących paragonów — sprawdź historię</span>' :
       (r.isTransfer || /Przelew własny/i.test(r.title || '')) ? '<span class="imp-dup-badge">przelew własny — pominięty</span>' : '';
-    const botSection = r.isDuplicate ? '' : `
+    const botSection = r.isDuplicate ? '' : income ? `
+      <div class="imp-row-bot">
+        <input class="imp-shop-input" id="isrc${i}" type="text" aria-label="Źródło przychodu"
+               placeholder="Źródło przychodu" maxlength="250" value="${esc(r.contractor || 'Wpływ bankowy')}">
+      </div>` : `
       <div class="imp-row-bot">
         <select class="imp-select ${r.category?'filled':''}" id="icat${i}"
                 onchange="onImpCatChange(${i},this)">
@@ -3029,13 +3052,13 @@ function _renderImportTable() {
     return `
     <div class="imp-row ${dupClass}">
       <div class="imp-row-top">
-        <label class="imp-check"><input type="checkbox" id="icb${i}" ${checked} onchange="updateImportSelected()"></label>
+        <label class="imp-check"><input type="checkbox" id="icb${i}" aria-label="Uwzględnij w imporcie" ${checked} ${r.isDuplicate ? 'disabled' : ''} onchange="updateImportSelected()"></label>
         <div class="imp-info">
           <div class="imp-date">${fmtD(r.date)}</div>
-          <div class="imp-name">${esc(r.shop || r.contractor)}${badge}</div>
+          <div class="imp-name">${esc(r.shop || r.contractor || 'Wpływ bankowy')}${badge}</div>
           <details class="receipt-help"><summary>Opis z banku</summary>${esc(r.contractor)}<br>${esc(r.title || '')}</details>
         </div>
-        <span class="imp-amt">−${fmt(r.amount)}</span>
+        <span class="imp-amt${income ? ' income' : ''}">${income ? '+' : '−'}${fmt(r.amount)}</span>
       </div>${botSection}
     </div>`;
   }).join('');
@@ -3058,10 +3081,16 @@ function onImpCatChange(i, sel) {
 }
 
 function updateImportSelected() {
-  const selected=_impRows.filter((r,i) => !r.isDuplicate && document.getElementById(`icb${i}`)?.checked);
-  const added=selected.filter(r => !r.linkRow), linked=selected.filter(r => r.linkRow);
-  document.getElementById('imp-summary').textContent=`Zaznaczone: ${added.length} nowych wydatków · ${fmt(added.reduce((s,r) => s+r.amount,0))}`+
-    (linked.length ? ` · ${linked.length} połączeń z paragonem (bez doliczania kwoty)` : '');
+  const selected = _impRows.filter((r, i) => !r.isDuplicate && document.getElementById(`icb${i}`)?.checked);
+  const expenses = selected.filter(r => r.kind !== 'income' && !r.linkRow);
+  const income = selected.filter(r => r.kind === 'income');
+  const linked = selected.filter(r => r.linkRow).length;
+  const duplicates = _impRows.filter(r => r.isDuplicate).length;
+  const total = rows => fmt(rows.reduce((sum, row) => sum + row.amount, 0));
+  document.getElementById('imp-summary').textContent =
+    `Zaznaczone wydatki (${expenses.length}) ${total(expenses)} · Przychody (${income.length}) ${total(income)}`
+    + (linked ? ` · ${linked} połączeń z paragonem` : '')
+    + (duplicates ? ` · Już zapisane (${duplicates})` : '');
   markMissingCategories(false);
 }
 
@@ -3073,7 +3102,7 @@ function markMissingCategories(force) {
   const missing = [];
   _impRows.forEach((r, i) => {
     const cb = document.getElementById(`icb${i}`);
-    const isMissing = !!cb?.checked && !document.getElementById(`icat${i}`)?.value;
+    const isMissing = r.kind !== 'income' && !!cb?.checked && !document.getElementById(`icat${i}`)?.value;
     cb?.closest('.imp-row')?.classList.toggle('imp-missing', isMissing);
     if (isMissing) missing.push(cb.closest('.imp-row'));
   });
@@ -3089,10 +3118,21 @@ function confirmImport() {
 
   _impRows.forEach((r, i) => {
     const cb   = document.getElementById(`icb${i}`);
+    if (r.isDuplicate || !cb?.checked) return;
+    if (r.kind === 'income') {
+      toImport.push({
+        kind: 'income',
+        date: r.date,
+        amount: r.amount,
+        source: (document.getElementById(`isrc${i}`)?.value.trim() || r.contractor || 'Wpływ bankowy').slice(0, 250),
+        details: (r.title || r.contractor || '').slice(0, 2000),
+        transactionId: r.transactionId
+      });
+      return;
+    }
     const cat  = document.getElementById(`icat${i}`)?.value || '';
     const shop = (document.getElementById(`ishop${i}`)?.value || '').trim().toUpperCase();
 
-    if (!cb?.checked) return;
     if (!cat) { skipped++; return; }
 
     toImport.push({
@@ -3116,7 +3156,7 @@ function confirmImport() {
     markMissingCategories(true);
     return toast(`Uzupełnij kategorię przy ${skipped} zaznaczonych wydatkach lub je odznacz.`, 'err');
   }
-  if (!toImport.length) return toast('Brak wydatków do importu (zaznacz i dodaj kategorię)', 'err');
+  if (!toImport.length) return toast('Zaznacz transakcje do importu.', 'err');
 
   const btn = document.getElementById('btn-confirm-import');
   btn.disabled = true; btn.textContent = 'Importuję…';
@@ -3127,8 +3167,7 @@ function confirmImport() {
     run('importBatch', [sheet, toImport], res => {
       btn.disabled = false; btn.textContent = '✓ Zatwierdź i wgraj do arkusza';
       if (res.success) {
-        const msg = `✓ Dodano ${res.imported} wydatków, połączono ${res.linked || 0} paragonów, pominięto ${res.skipped || 0} duplikatów.`
-          + (skipped ? ` (pominięto ${skipped} bez kategorii)` : '');
+        const msg = `✓ Wydatki (${res.imported}) · Przychody (${res.incomeImported || 0}) · Paragony (${res.linked || 0}) · Duplikaty (${res.skipped || 0})`;
         toast(msg, 'ok');
         resetImport();
         S.cachedDash = null; S.cachedHist = null;
@@ -3548,6 +3587,7 @@ function demoData(fn) {
   if (fn === 'getBudgetDashboard') return { categories:[], hasBudgets:false };
   if (fn === 'getRules') return {};
   if (fn === 'getExpenseFingerprints') return [];
+  if (fn === 'getImportFingerprints') return {expenses: [], income: []};
   if (fn === 'getInvestCategories') return ['USDC/Binance'];
   if (fn === 'addExpense'    ) return {success:true,row:99};
   if (fn === 'addIncome'     ) return {success:true,row:99};
