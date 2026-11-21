@@ -137,6 +137,16 @@ body{
 .cat-tile .ca{font-size:15px;font-weight:800}
 .cat-tile .ca.zero{opacity:.35;font-size:12px}
 .cat-tile .tap-hint{font-size:8px;opacity:.6;margin-top:2px}
+.income-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.income-tile{
+  display:flex;flex-direction:column;justify-content:space-between;gap:6px;
+  min-width:0;padding:11px 10px;border:1px solid #bbdec3;border-radius:10px;
+  background:#e9f6ec;color:#215a31;text-align:left;font:inherit;cursor:pointer;
+}
+.income-tile:active{background:#d5efdb}
+.income-tile:focus-visible{outline:2px solid #256329;outline-offset:2px}
+.income-source{font-size:12px;font-weight:700;overflow-wrap:anywhere}
+.income-tile strong{font-size:16px;font-weight:800;overflow-wrap:anywhere}
 
 /* ── SHOP LIST ── */
 .shop-list{list-style:none}
@@ -427,9 +437,9 @@ body{
 .cat-ov{
   position:fixed;inset:0;background:rgba(0,0,0,.5);
   z-index:450;display:flex;flex-direction:column;justify-content:flex-end;
-  opacity:0;pointer-events:none;transition:opacity .22s;
+  opacity:0;visibility:hidden;pointer-events:none;transition:opacity .22s,visibility 0s .26s;
 }
-.cat-ov.show{opacity:1;pointer-events:all}
+.cat-ov.show{opacity:1;visibility:visible;pointer-events:all;transition-delay:0s}
 .cat-sheet{
   background:#fff;border-radius:20px 20px 0 0;
   max-height:84vh;display:flex;flex-direction:column;
@@ -442,9 +452,9 @@ body{
   display:flex;justify-content:space-between;align-items:center;
   flex-shrink:0;border-bottom:1px solid var(--border);
 }
-.cat-hdr-left{display:flex;align-items:center;gap:10px}
+.cat-hdr-left{display:flex;align-items:center;gap:10px;min-width:0}
 .cat-hdr-dot{width:14px;height:14px;border-radius:50%;flex-shrink:0}
-.cat-hdr h2{font-size:16px;font-weight:800}
+.cat-hdr h2{font-size:16px;font-weight:800;overflow-wrap:anywhere}
 .cat-close{
   width:32px;height:32px;border:none;background:var(--border);
   border-radius:50%;font-size:14px;cursor:pointer;
@@ -465,6 +475,9 @@ body{
 .cd-name{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cd-sub{font-size:11px;color:var(--muted);margin-top:2px}
 .cd-amt{font-size:15px;font-weight:800;color:var(--red);flex-shrink:0;margin-left:8px;padding-top:2px}
+.cd-amt.inc{color:#256329}
+.cd-income .cd-top{margin-bottom:0}
+.cd-income .cd-name{white-space:normal;overflow-wrap:anywhere}
 .cd-select{
   width:100%;padding:9px 10px;border:2px solid var(--border);
   border-radius:8px;font-size:13px;font-weight:600;
@@ -833,13 +846,13 @@ body{
 
 <!-- CATEGORY DETAIL OVERLAY -->
 <div class="cat-ov" id="cat-ov">
-  <div class="cat-sheet">
+  <div class="cat-sheet" role="dialog" aria-modal="true" aria-labelledby="cd-title">
     <div class="cat-hdr">
       <div class="cat-hdr-left">
         <div class="cat-hdr-dot" id="cd-dot"></div>
         <h2 id="cd-title">Kategoria</h2>
       </div>
-      <button class="cat-close" onclick="closeCatDetail()">✕</button>
+      <button class="cat-close" id="cd-close" type="button" aria-label="Zamknij szczegóły" onclick="closeCatDetail()">✕</button>
     </div>
     <div class="cat-meta" id="cd-meta"></div>
     <div class="cat-body" id="cd-body">
@@ -935,6 +948,9 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('cat-ov').addEventListener('click', e => {
     if (e.target === document.getElementById('cat-ov')) closeCatDetail();
   });
+  document.getElementById('cat-ov').addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeCatDetail();
+  });
 });
 
 /* ════════════════════════════════════════════════
@@ -1003,6 +1019,7 @@ function loadDash() {
     S.cachedDash = data;
     renderDash(data);
     if (_cdCat !== null) renderCatDetail();
+    if (_cdIncomeKey !== null) renderIncomeDetail();
     if (S.period !== 'year') loadBudgetDash();
   };
   if (S.period === 'year') run('getAnnualSummary', [S.person, S.year], onLoaded, onErr);
@@ -1016,6 +1033,36 @@ function loadBudgetDash() {
 
 // Jak NOT_SPENDING_CATEGORIES w Code.js: przenoszenie pieniędzy między swoimi kontami, nie wydatek.
 const NOT_SPENDING = ['PRZELEW WŁASNY'];
+
+function groupIncomeBySource(items) {
+  const groups = new Map();
+  for (const item of items || []) {
+    const source = String(item.source || '').trim().replace(/\s+/g, ' ');
+    const key = source.toLocaleLowerCase('pl-PL');
+    let group = groups.get(key);
+    if (!group) {
+      group = {key, name: source || 'Brak źródła', cents: 0, items: []};
+      groups.set(key, group);
+    }
+    group.cents += Math.round(item.amount * 100);
+    group.items.push(item);
+  }
+  return groups;
+}
+
+function renderIncomeTiles(items) {
+  const groups = [...groupIncomeBySource(items).values()]
+    .sort((a, b) => b.cents - a.cents || a.name.localeCompare(b.name, 'pl'));
+  return `<section class="card" aria-labelledby="income-title">
+    <h2 class="card-title" id="income-title">Przychody wg źródła</h2>
+    ${groups.length ? `<div class="income-grid">${groups.map(group => `
+      <button type="button" class="income-tile" data-source="${esc(group.key)}" aria-haspopup="dialog"
+              onclick="showIncomeDetail(this)">
+        <span class="income-source">${esc(group.name)}</span>
+        <strong>${fmt(group.cents / 100)}</strong>
+      </button>`).join('')}</div>` : '<div class="receipt-help">Brak przychodów w tym okresie</div>'}
+  </section>`;
+}
 
 function renderDash(d) {
   const el   = document.getElementById('dash-content');
@@ -1075,6 +1122,7 @@ function renderDash(d) {
       </div>
     </div>
 
+    ${renderIncomeTiles(d.incomeItems)}
     <div id="budget-dash-card"></div>
     ${renderSpendingReview(d)}
     ${d.isAnnual ? renderYearMonths(d) : ''}
@@ -1093,21 +1141,66 @@ function renderDash(d) {
 /* ════════════════════════════════════════════════
    CATEGORY DETAIL — klik w kafelek
 ════════════════════════════════════════════════ */
-let _cdCat = null;  // aktywna kategoria w overlay
+let _cdCat = null;
+let _cdIncomeKey = null;
+let _cdTrigger = null;
 
 function showCatDetail(catName) {
   _cdCat = catName;
+  _cdIncomeKey = null;
   const col = CAT_MAP[catName] || '#999';
-  document.getElementById('cd-dot').style.background   = col;
-  document.getElementById('cd-title').textContent       = catName;
-  document.getElementById('cd-title').style.color       = col;
   renderCatDetail();
+  openReportDetail(catName, col, document.activeElement);
+}
+
+function showIncomeDetail(tile) {
+  const group = groupIncomeBySource(S.cachedDash?.incomeItems).get(tile.dataset.source);
+  if (!group) return;
+  _cdCat = null;
+  _cdIncomeKey = group.key;
+  renderIncomeDetail(group);
+  openReportDetail(group.name, '#256329', tile);
+}
+
+function openReportDetail(title, color, trigger) {
+  _cdTrigger = trigger;
+  document.getElementById('cd-dot').style.background = color;
+  const heading = document.getElementById('cd-title');
+  heading.textContent = title;
+  heading.style.color = color;
   document.getElementById('cat-ov').classList.add('show');
+  document.getElementById('cd-body').scrollTop = 0;
+  document.getElementById('cd-close').focus?.();
 }
 
 function closeCatDetail() {
   document.getElementById('cat-ov').classList.remove('show');
   _cdCat = null;
+  _cdIncomeKey = null;
+  _cdTrigger?.focus();
+  _cdTrigger = null;
+}
+
+function renderIncomeDetail(group = groupIncomeBySource(S.cachedDash?.incomeItems).get(_cdIncomeKey)) {
+  const body = document.getElementById('cd-body');
+  const period = S.period === 'year' ? 'Rok' : MONTHS_PL[S.month - 1];
+  const items = group?.items.slice().sort((a, b) => b.date.localeCompare(a.date)) || [];
+  const meta = document.getElementById('cd-meta');
+  meta.textContent = `${period} ${S.year} · Wpłaty (${items.length}) · Łącznie ${fmt((group?.cents || 0) / 100)}`;
+  body.innerHTML = items.length ? items.map(item => {
+    const person = S.person === 'razem' && (item.person || item.sheetName);
+    const badge = person
+      ? ` <span class="person-badge ${person === 'Wojtek' ? 'badge-w' : 'badge-s'}">${esc(person)}</span>` : '';
+    return `<div class="cd-item cd-income">
+      <div class="cd-top">
+        <div class="cd-info">
+          <div class="cd-name">${esc(item.notes || item.source || 'Przychód')}</div>
+          <div class="cd-sub">${fmtD(item.date)}${badge}</div>
+        </div>
+        <span class="cd-amt inc">${item.amount > 0 ? '+' : ''}${fmt(item.amount)}</span>
+      </div>
+    </div>`;
+  }).join('') : '<div class="empty">Brak wpłat z tego źródła w tym okresie</div>';
 }
 
 function renderCatDetail() {
