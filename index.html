@@ -2965,9 +2965,25 @@ function parseErsteListRows(sortedRows) {
   }
 
   if (!ops.length) return { error: 'Nie znaleziono operacji w PDF z Erste Banku.' };
-  for (let i = 0; i + 1 < ops.length; i++) {
-    if (ops[i].balance !== ops[i + 1].balance + ops[i].amount)
-      return { error: 'Odczyt PDF Erste: salda się nie zgadzają (' + ops[i].date + ') — import zatrzymany, aby nie pominąć transakcji.' };
+  // Kontrola spójności niezależna od kolejności wierszy (Erste potrafi wypisać operacje z tego
+  // samego dnia w innej kolejności niż księgowanie). Każda operacja: saldo przed = saldo po − kwota.
+  // Kompletny ciąg ⇒ po odjęciu salda „przed” od salda „po” (jako multizbiór) zostaje dokładnie
+  // jedno saldo końcowe i jedno początkowe. Brakująca/podwójna operacja psuje ten warunek.
+  const tally = new Map();
+  for (const op of ops) {
+    tally.set(op.balance, (tally.get(op.balance) || 0) + 1);
+    const before = op.balance - op.amount;
+    tally.set(before, (tally.get(before) || 0) - 1);
+  }
+  let surplus = 0, deficit = 0, broken = false;
+  for (const n of tally.values()) {
+    if (n === 1) surplus++;
+    else if (n === -1) deficit++;
+    else if (n !== 0) broken = true;
+  }
+  if (broken || surplus > 1 || deficit > 1 || surplus !== deficit) {
+    const sorted = ops.slice().sort((a, b) => a.date.localeCompare(b.date));
+    return { error: 'Odczyt PDF Erste: salda się nie zgadzają (' + sorted[sorted.length - 1].date + ') — import zatrzymany, aby nie pominąć transakcji.' };
   }
 
   const rows = ops.filter(op => op.amount !== 0).map(op => {
