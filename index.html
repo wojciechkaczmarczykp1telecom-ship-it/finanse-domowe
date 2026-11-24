@@ -337,6 +337,7 @@ body{
 }
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast.ok{background:var(--green)}.toast.err{background:var(--red)}
+.toast.err{white-space:normal;border-radius:14px;text-align:center;width:max-content}
 
 /* ── BUDGET ── */
 .bud-item{margin-bottom:14px}
@@ -2234,7 +2235,7 @@ function toast(msg, type) {
   el.textContent = msg;
   el.className = 'toast show ' + (type||'');
   clearTimeout(_toastT);
-  _toastT = setTimeout(() => { el.className = 'toast'; }, 3000);
+  _toastT = setTimeout(() => { el.className = 'toast'; }, type === 'err' ? 10000 : 3000);
 }
 
 /* ════════════════════════════════════════════════
@@ -2944,9 +2945,25 @@ function parseErsteListRows(sortedRows) {
     return s + (k && gap > 1 ? ' ' : '') + it.text;
   }, '');
 
+  // Wiersze składamy na nowo z tolerancją ±4 px zamiast kubełków co 6 px: data i kwoty jednej
+  // operacji mają czasem Y różniące się o 1–2 px i na granicy kubełka lądowały w różnych wierszach,
+  // przez co operacja wypadała, a ciąg sald się rwał (24.11.2026).
+  const clustered = [];
+  sortedRows.flatMap(r => r.items)
+    .sort((a, b) => a.page - b.page || b.y - a.y)
+    .forEach(it => {
+      const last = clustered[clustered.length - 1];
+      if (last && last.page === it.page && Math.abs(last.y - it.y) <= 4) last.items.push(it);
+      else clustered.push({ page: it.page, y: it.y, items: [it] });
+    });
+  clustered.forEach(r => {
+    r.items.sort((a, b) => a.x - b.x);
+    r.text = r.items.map(i => i.text).join(' ').trim();
+  });
+
   const ops = [];
   let current = null, inOps = false;
-  for (const row of sortedRows) {
+  for (const row of clustered) {
     if (/^Data operacji Operacja Kwota Saldo$/i.test(row.text)) { inOps = true; continue; }
     if (!inOps) continue;
     if (/Dokument jest wydrukiem/i.test(row.text)) { inOps = false; current = null; continue; }
@@ -2982,8 +2999,14 @@ function parseErsteListRows(sortedRows) {
     else if (n !== 0) broken = true;
   }
   if (broken || surplus > 1 || deficit > 1 || surplus !== deficit) {
-    const sorted = ops.slice().sort((a, b) => a.date.localeCompare(b.date));
-    return { error: 'Odczyt PDF Erste: salda się nie zgadzają (' + sorted[sorted.length - 1].date + ') — import zatrzymany, aby nie pominąć transakcji.' };
+    // Wskazujemy operacje, które nie łączą się z żadną inną — od razu widać, gdzie leży problem.
+    const afters = new Set(ops.map(o => o.balance));
+    const befores = new Set(ops.map(o => o.balance - o.amount));
+    const fmt = c => (c / 100).toFixed(2).replace('.', ',');
+    const loose = ops.filter(o => !afters.has(o.balance - o.amount) || !befores.has(o.balance))
+      .slice(0, 4).map(o => `${o.date} ${fmt(o.amount)} (saldo ${fmt(o.balance)})`);
+    return { error: 'Odczyt PDF Erste: salda się nie zgadzają — import zatrzymany, aby nie pominąć transakcji. '
+      + `Odczytano ${ops.length} operacji. Na styku: ` + loose.join('; ') };
   }
 
   const rows = ops.filter(op => op.amount !== 0).map(op => {
