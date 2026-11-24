@@ -538,9 +538,9 @@ body{
 <div class="topbar">
   <h1>🏠 Finanse Domowe</h1>
   <div class="person-row">
-    <button class="p-btn" onclick="setPerson('Wojtek',this)">👨 Wojtek</button>
-    <button class="p-btn"        onclick="setPerson('Sylwia',this)">👩 Sylwia</button>
-    <button class="p-btn active" onclick="setPerson('razem',this)">👨‍👩‍👧 Razem</button>
+    <button class="p-btn" id="person-wojtek" onclick="setPerson('Wojtek',this)">👨 Wojtek</button>
+    <button class="p-btn" id="person-sylwia" onclick="setPerson('Sylwia',this)">👩 Sylwia</button>
+    <button class="p-btn active" id="person-razem" onclick="setPerson('razem',this)">👨‍👩‍👧 Razem</button>
   </div>
 </div>
 
@@ -754,7 +754,7 @@ body{
       <div class="card-title">🧾 Paragon z Biedronki — screeny lub PDF</div>
       <p class="receipt-help">Wybierz screeny <strong>jednego paragonu</strong> (od góry do dołu, z widoczną datą i kwotą końcową) albo PDF paragonu z aplikacji Biedronki — znajdziesz go w Pobranych lub Dokumentach. Odczyt odbywa się na Twoim urządzeniu. Przed zapisem sprawdzisz produkty i połączysz je z płatnością z banku.</p>
       <label class="flabel" for="receipt-person">Kto zapłacił?</label>
-      <select id="receipt-person" class="finput"><option>Wojtek</option><option>Sylwia</option></select>
+      <select id="receipt-person" class="finput"><option value="Wojtek">Wojtek</option><option value="Sylwia">Sylwia</option></select>
       <label class="flabel" for="receipt-files">Screeny (PNG, JPG, WebP) lub PDF</label>
       <input type="file" id="receipt-files" accept="image/png,image/jpeg,image/webp,application/pdf,.pdf" multiple class="finput">
       <button class="btn-submit" id="receipt-read" onclick="analyzeReceiptImages()">Odczytaj paragon</button>
@@ -775,8 +775,8 @@ body{
       <div class="fg">
         <label class="flabel">Dla kogo?</label>
         <div class="tab-row" id="imp-person" style="margin-bottom:0">
-          <button class="tab-btn active" onclick="setImpPerson('Wojtek',this)">👨 Wojtek</button>
-          <button class="tab-btn"        onclick="setImpPerson('Sylwia',this)">👩 Sylwia</button>
+          <button class="tab-btn active" id="imp-person-wojtek" onclick="setImpPerson('Wojtek',this)">👨 Wojtek</button>
+          <button class="tab-btn" id="imp-person-sylwia" onclick="setImpPerson('Sylwia',this)">👩 Sylwia</button>
         </div>
       </div>
       <div class="fg">
@@ -894,11 +894,71 @@ setCats(Object.keys(CAT_COLORS));
 const SOURCES = ['MACIERZYŃSKI','800+ x2','OD TEŚCIÓW WIŚNIOWA',
                  'WYRÓWNANIA OD LUDZI','PRZELEW WŁASNY','INNE'];
 
+/* Instancja jest wybierana przez ?u=<klucz> i zapamiętywana dla uruchomień PWA. */
+const FD_INSTANCES = {
+  '': {
+    exec: 'https://script.google.com/macros/s/AKfycbwxLAuUQLQJVo68LvfE-DNUJ7gxuo5yJCbO6_E4UT69fU_oWjP04oD-OWPiN_tJ/exec',
+    labels: { Wojtek: 'Wojtek', Sylwia: 'Sylwia' }
+  },
+  artek: {
+    exec: '__ARTEK_EXEC__',
+    labels: { Wojtek: 'Artek', Sylwia: null }
+  }
+};
+const FD_INSTANCE_KEY = 'fd_instance';
+let fdInstanceMemory = '';
+function fdInstanceCookie_() {
+  try {
+    const prefix = FD_INSTANCE_KEY + '=';
+    return String(document.cookie || '').split(';').map(part => part.trim())
+      .filter(part => part.indexOf(prefix) === 0).map(part => decodeURIComponent(part.slice(prefix.length)))[0] || '';
+  } catch (e) { return ''; }
+}
+function saveFdInstance_(key) {
+  fdInstanceMemory = key;
+  try { localStorage.setItem(FD_INSTANCE_KEY, key); } catch (e) {}
+  try {
+    const secure = location.protocol === 'https:' ? '; Secure' : '';
+    const path = location.pathname.replace(/[^/]*$/, '') || '/';
+    document.cookie = FD_INSTANCE_KEY + '=' + encodeURIComponent(key) + '; max-age=31536000; path=' + path + '; SameSite=Strict' + secure;
+  } catch (e) {}
+}
+function selectedFdInstance_() {
+  let requested = '';
+  try { requested = new URLSearchParams(location.search).get('u'); } catch (e) {}
+  if (requested !== null) {
+    const key = Object.prototype.hasOwnProperty.call(FD_INSTANCES, requested) ? requested : '';
+    saveFdInstance_(key);
+    return key;
+  }
+  let saved = fdInstanceMemory;
+  try { saved = saved || localStorage.getItem(FD_INSTANCE_KEY) || ''; } catch (e) {}
+  saved = saved || fdInstanceCookie_();
+  return Object.prototype.hasOwnProperty.call(FD_INSTANCES, saved) ? saved : '';
+}
+const FD_INSTANCE_ID = selectedFdInstance_();
+const FD_INSTANCE = FD_INSTANCES[FD_INSTANCE_ID];
+const FD_SINGLE_PERSON = FD_INSTANCE.labels.Sylwia === null;
+function personLabel(person) { return FD_INSTANCE.labels[person] || person; }
+function configureInstanceUi() {
+  document.getElementById('person-wojtek').textContent = '👨 ' + personLabel('Wojtek');
+  document.getElementById('person-sylwia').textContent = '👩 ' + personLabel('Sylwia');
+  document.getElementById('receipt-person').options[0].textContent = personLabel('Wojtek');
+  document.getElementById('receipt-person').options[1].textContent = personLabel('Sylwia');
+  document.getElementById('imp-person-wojtek').textContent = '👨 ' + personLabel('Wojtek');
+  document.getElementById('imp-person-sylwia').textContent = '👩 ' + personLabel('Sylwia');
+  if (!FD_SINGLE_PERSON) return;
+  document.getElementById('person-sylwia').style.display = 'none';
+  document.getElementById('person-razem').style.display = 'none';
+  document.querySelector('#receipt-person option[value="Sylwia"]').hidden = true;
+  document.getElementById('imp-person-sylwia').style.display = 'none';
+}
+
 /* ════════════════════════════════════════════════
    STATE
 ════════════════════════════════════════════════ */
 const S = {
-  person: 'razem',
+  person: FD_SINGLE_PERSON ? 'Wojtek' : 'razem',
   period: 'month',
   year:   new Date().getFullYear(),
   month:  new Date().getMonth() + 1,
@@ -927,6 +987,7 @@ let dashLoadId = 0;
    INIT
 ════════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
+  configureInstanceUi();
   if (typeof google === 'undefined' || !google.script) {
     const notice=document.createElement('div');notice.className='receipt-help';notice.style.padding='8px 16px';
     notice.textContent='Podgląd z przykładowymi danymi. Zapisy działają w aplikacji uruchomionej pod dotychczasowym adresem Google.';
@@ -971,6 +1032,7 @@ function showView(v) {
 }
 
 function setPerson(p, btn) {
+  if (FD_SINGLE_PERSON && p !== 'Wojtek') return;
   S.person = p;
   document.querySelectorAll('.p-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
@@ -1101,8 +1163,8 @@ function renderDash(d) {
 
   const splitHTML = S.person === 'razem' && d.wojtekExpenses != null ? `
     <div class="split-row">
-      <span>👨 Wojtek: −${fmt(d.wojtekExpenses)}</span>
-      <span>👩 Sylwia: −${fmt(d.sylwiaExpenses)}</span>
+      <span>👨 ${esc(personLabel('Wojtek'))}: −${fmt(d.wojtekExpenses)}</span>
+      <span>👩 ${esc(personLabel('Sylwia'))}: −${fmt(d.sylwiaExpenses)}</span>
     </div>` : '';
 
   el.innerHTML = `
@@ -1191,7 +1253,7 @@ function renderIncomeDetail(group = groupIncomeBySource(S.cachedDash?.incomeItem
   body.innerHTML = items.length ? items.map(item => {
     const person = S.person === 'razem' && (item.person || item.sheetName);
     const badge = person
-      ? ` <span class="person-badge ${person === 'Wojtek' ? 'badge-w' : 'badge-s'}">${esc(person)}</span>` : '';
+      ? ` <span class="person-badge ${person === 'Wojtek' ? 'badge-w' : 'badge-s'}">${esc(personLabel(person))}</span>` : '';
     return `<div class="cd-item cd-income">
       <div class="cd-top">
         <div class="cd-info">
@@ -1232,7 +1294,7 @@ function renderCatDetail() {
 
   body.innerHTML = items.map((item, idx) => {
     const personBadge = item.person
-      ? `<span class="person-badge ${item.person==='Wojtek'?'badge-w':'badge-s'}">${item.person}</span>`
+      ? `<span class="person-badge ${item.person==='Wojtek'?'badge-w':'badge-s'}">${esc(personLabel(item.person))}</span>`
       : '';
     return `<div class="cd-item" id="cdi-${idx}">
       <div class="cd-top">
@@ -1369,7 +1431,7 @@ function renderHist(d) {
 
   const li = items.map(i => {
     const personBadge = i.person
-      ? `<span class="person-badge ${i.person==='Wojtek'?'badge-w':'badge-s'}">${i.person}</span>`
+      ? `<span class="person-badge ${i.person==='Wojtek'?'badge-w':'badge-s'}">${esc(personLabel(i.person))}</span>`
       : '';
     // Usuwanie działa też w widoku „Razem” — każdy wpis niesie własny sheetName i rowNum.
     const delBtn = (i.rowNum && i.sheetName && !i.receipt)
@@ -2246,6 +2308,7 @@ let _impRows   = [];
 let _impRules  = {};
 
 function setImpPerson(p, btn) {
+  if (FD_SINGLE_PERSON && p !== 'Wojtek') return;
   _impPerson = p;
   document.querySelectorAll('#imp-person .tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
@@ -3335,7 +3398,7 @@ function setReportPeriod(period) {
 }
 
 function renderYearMonths(d) {
-  return `<div class="card"><div class="card-title">Wydatki miesiąc po miesiącu · ${S.person === 'razem' ? 'cała rodzina' : esc(S.person)}</div>
+  return `<div class="card"><div class="card-title">Wydatki miesiąc po miesiącu · ${S.person === 'razem' ? 'cała rodzina' : esc(personLabel(S.person))}</div>
     <table class="report-table"><thead><tr><th>Miesiąc</th><th>Wydatki</th><th>Od początku roku</th></tr></thead><tbody>
     ${d.months.map(m => `<tr><td>${MONTHS_PL[m.month-1]}</td><td>${m.count ? fmt(m.expenses) : 'brak danych'}</td><td>${fmt(m.cumulative)}</td></tr>`).join('')}
     </tbody></table><p class="receipt-help">Raport obejmuje zapisane transakcje. Brak wpisów nie oznacza braku wydatków. Przychody: ${fmt(d.totalIncome)}.</p></div>`;
@@ -3351,7 +3414,7 @@ function renderSpendingReview(d) {
     const k=e.shop.toUpperCase(), current=small.get(k)||{count:0,total:0}; current.count++;current.total+=e.amount;small.set(k,current);
   });
   const frequent = [...small].filter(([,v]) => v.count >= 5).sort((a,b) => b[1].total-a[1].total).slice(0,3);
-  return `<div class="card"><div class="card-title">Co warto przejrzeć · ${S.person === 'razem' ? 'razem' : esc(S.person)}</div>
+  return `<div class="card"><div class="card-title">Co warto przejrzeć · ${S.person === 'razem' ? 'razem' : esc(personLabel(S.person))}</div>
     <div class="focus-cats">${focus.map(c => `<button onclick="showCatDetail('${c}')">${c}<strong>${fmt(d.byCategory[c] || 0)}</strong></button>`).join('')}</div>
     <p class="receipt-help">Oznaczone wydatki na przyjemności: <strong>${fmt(discretionary)}</strong>. To obszary do własnej oceny, nie automatycznie zbędne zakupy.</p>
     ${frequent.map(([shop,v]) => `<p class="receipt-help">${esc(shop)}: ${v.count} drobnych zakupów do 30 zł, razem ${fmt(v.total)}.</p>`).join('')}
@@ -3582,7 +3645,7 @@ function openReceiptEditor(data) {
   document.getElementById('import-step1').style.display='none';
   document.getElementById('import-step2').style.display='none';
   const el=document.getElementById('receipt-editor'); el.style.display='block';
-  el.innerHTML=`<div class="card-title">Sprawdź podział zakupu · ${esc(data.person)}</div>
+  el.innerHTML=`<div class="card-title">Sprawdź podział zakupu · ${esc(personLabel(data.person))}</div>
     <p class="receipt-help">Suma produktów musi zgadzać się z płatnością. Kwoty produktów wpisuj za całą kupioną ilość, po rabatach. Rabat możesz wpisać jako osobną kwotę ujemną. Nieznaną pozycję możesz zostawić bez kategorii.</p>
     ${(data.warnings || []).length ? `<p class="receipt-help">${esc(data.warnings.join('\n'))}</p>` : ''}
     <details class="receipt-preview"><summary>Pokaż źródło paragonu</summary>${_receiptImages.map(url => `<img src="${url}" alt="Paragon">`).join('')}</details>
@@ -3971,7 +4034,7 @@ function demoData(fn) {
   };
 
   window.google = { script: { run: runner(null, null, null) } };
-})("https://script.google.com/macros/s/AKfycbwxLAuUQLQJVo68LvfE-DNUJ7gxuo5yJCbO6_E4UT69fU_oWjP04oD-OWPiN_tJ/exec");
+})(FD_INSTANCE.exec);
 /* Po starcie pobierz aktualne kategorie z backendu (jedno źródło prawdy). */
 (function () {
   function refresh() {
