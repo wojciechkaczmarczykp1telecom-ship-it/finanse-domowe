@@ -2646,8 +2646,9 @@ async function _analyzeImportPdf(file) {
   }
   toast('Analizuję PDF…', '');
   try {
-    const { rows, error } = await parseIngPdf(file);
+    const { rows, error, warning } = await parseIngPdf(file);
     if (error) return toast(error, 'err');
+    if (warning) toast(warning, 'err');
     run('getRules', [], rules => {
       _impRules = rules;
       _finishAnalyze(rows);
@@ -2962,13 +2963,14 @@ function parseErsteListRows(sortedRows) {
   });
 
   const ops = [];
-  let current = null, inOps = false;
+  let current = null, inOps = false, pricedRows = 0;
   for (const row of clustered) {
     if (/^Data operacji Operacja Kwota Saldo$/i.test(row.text)) { inOps = true; continue; }
     if (!inOps) continue;
     if (/Dokument jest wydrukiem/i.test(row.text)) { inOps = false; current = null; continue; }
     if (/^Data księgowania/i.test(glue(row.items))) continue;
     const amounts = row.items.filter(i => i.x >= 380 && moneyRe.test(i.text));
+    if (amounts.length === 2) pricedRows++; // każdy wiersz „kwota + saldo” to jedna operacja
     const dateM = glue(row.items.filter(i => i.x < 120)).match(/^(\d{1,2}) (\S+) (\d{4})$/);
     if (dateM && MONTHS[dateM[2].toLowerCase()] && amounts.length === 2) {
       const date = `${dateM[3]}-${String(MONTHS[dateM[2].toLowerCase()]).padStart(2, '0')}-${dateM[1].padStart(2, '0')}`;
@@ -2982,31 +2984,36 @@ function parseErsteListRows(sortedRows) {
   }
 
   if (!ops.length) return { error: 'Nie znaleziono operacji w PDF z Erste Banku.' };
-  // Kontrola spójności niezależna od kolejności wierszy (Erste potrafi wypisać operacje z tego
-  // samego dnia w innej kolejności niż księgowanie). Każda operacja: saldo przed = saldo po − kwota.
-  // Kompletny ciąg ⇒ po odjęciu salda „przed” od salda „po” (jako multizbiór) zostaje dokładnie
-  // jedno saldo końcowe i jedno początkowe. Brakująca/podwójna operacja psuje ten warunek.
+  // Twarda kontrola: odczytaliśmy każdy wiersz z kwotą i saldem. Gdyby parser zgubił operację
+  // (np. rozjechane współrzędne), liczby się rozejdą i import stanie.
+  if (pricedRows !== ops.length)
+    return { error: `Odczyt PDF Erste: w dokumencie jest ${pricedRows} operacji, odczytano ${ops.length} — import zatrzymany, aby nie pominąć transakcji.` };
+
+  // Ciąg sald (niezależnie od kolejności wierszy): saldo przed = saldo po − kwota. Dziura NIE blokuje
+  // importu — zestawienie Erste filtruje po dacie operacji, więc operacja z datą sprzed zakresu,
+  // zaksięgowana w zakresie, zmienia saldo, ale nie jest wypisana (PDF 01–24.11.2026: brak −82,50).
+  // Wszystkie wypisane operacje i tak odczytaliśmy, więc tylko ostrzegamy.
   const tally = new Map();
   for (const op of ops) {
     tally.set(op.balance, (tally.get(op.balance) || 0) + 1);
     const before = op.balance - op.amount;
     tally.set(before, (tally.get(before) || 0) - 1);
   }
-  let surplus = 0, deficit = 0, broken = false;
-  for (const n of tally.values()) {
-    if (n === 1) surplus++;
-    else if (n === -1) deficit++;
-    else if (n !== 0) broken = true;
-  }
-  if (broken || surplus > 1 || deficit > 1 || surplus !== deficit) {
-    // Wskazujemy operacje, które nie łączą się z żadną inną — od razu widać, gdzie leży problem.
+  let surplus = 0;
+  for (const n of tally.values()) if (n > 0) surplus += n;
+  const fmt = c => (Math.abs(c) / 100).toFixed(2).replace('.', ',');
+  let warning = '';
+  if (surplus > 1) {
     const afters = new Set(ops.map(o => o.balance));
-    const befores = new Set(ops.map(o => o.balance - o.amount));
-    const fmt = c => (c / 100).toFixed(2).replace('.', ',');
-    const loose = ops.filter(o => !afters.has(o.balance - o.amount) || !befores.has(o.balance))
-      .slice(0, 4).map(o => `${o.date} ${fmt(o.amount)} (saldo ${fmt(o.balance)})`);
-    return { error: 'Odczyt PDF Erste: salda się nie zgadzają — import zatrzymany, aby nie pominąć transakcji. '
-      + `Odczytano ${ops.length} operacji. Na styku: ` + loose.join('; ') };
+    const gaps = ops.filter(o => o !== ops[ops.length - 1] && !afters.has(o.balance - o.amount))
+      .map(o => {
+        const before = o.balance - o.amount;
+        const prev = ops.filter(p => p.balance !== before && p.date <= o.date)
+          .sort((a, b) => Math.abs(a.balance - before) - Math.abs(b.balance - before))[0];
+        return prev ? `${fmt(prev.balance - before)} zł przed ${o.date}` : `przed ${o.date}`;
+      });
+    warning = 'Uwaga: w saldach Erste jest luka (' + gaps.slice(0, 3).join('; ') + ') — bank nie wypisał tej operacji '
+      + 'w zestawieniu (zwykle data operacji sprzed zakresu). Wszystkie operacje z PDF zostały odczytane; brakującą dodaj ręcznie lub pobierz szerszy zakres.';
   }
 
   const rows = ops.filter(op => op.amount !== 0).map(op => {
@@ -3025,7 +3032,7 @@ function parseErsteListRows(sortedRows) {
       rawText: op.rawText
     };
   });
-  return rows.length ? { rows } : { error: 'Nie znaleziono transakcji w PDF z Erste Banku.' };
+  return rows.length ? { rows, warning } : { error: 'Nie znaleziono transakcji w PDF z Erste Banku.' };
 }
 
 // Paragon ma krótką nazwę („BIEDRONKA”), a reguła importu potrafi podstawić pełnego kontrahenta
