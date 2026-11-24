@@ -3808,7 +3808,7 @@ function demoData(fn) {
 <script>
 /* google.script.run → fetch do doPost (PWA, build_pwa.cjs) */
 (function pwaShim(EXEC_URL) {
-  var PIN_KEY = 'fd_pin';
+  var PIN_KEY = FD_INSTANCE_ID ? 'fd_pin_' + FD_INSTANCE_ID : 'fd_pin';
   var memPin = '';                 // PIN trzymany w pamięci — localStorage bywa zablokowany (np. Huawei)
   var pinSetupPromise = null;
   var pinPromptPromise = null;
